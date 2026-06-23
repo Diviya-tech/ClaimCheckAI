@@ -1,0 +1,241 @@
+# Architecture Decision Records
+
+This log captures the major design decisions behind ClaimCheck AI — the problem
+faced, the options weighed, the choice made, and *why*. Each record is meant to
+be read by a future contributor (or a future us) asking "why is it built this
+way?"
+
+For the research these decisions draw on, see [`RESEARCH.md`](RESEARCH.md).
+
+---
+
+## ADR-001 — Evidence Dossier over a numerical trust score
+
+**Context.** The obvious output for an automated fact-checker is a single
+credibility number ("73% true"). It's easy to compute, easy to display, easy to
+sort. But it collapses all reasoning into one opaque figure.
+
+**Options considered.**
+1. A 0–100 credibility / trust score.
+2. A single binary label (true / false).
+3. A structured **evidence dossier** — per-fact verdicts + cited evidence + reasoning.
+
+**Decision.** Build the output as an **evidence dossier**, not a score.
+
+**Why.** Research at CHI 2025 ("Show Me the Work") found professional
+fact-checkers consider numerical credibility scores *unhelpful and disconnected
+from how they actually reason*. A score hides the work; a dossier shows it. Our
+product thesis is "show me the work, not a number" — so the output format has to
+*be* the work: every atomic fact, its verdict, the evidence behind it, and the
+reasoning that connects them. A consumer can then form their own judgment instead
+of trusting a black-box figure.
+
+---
+
+## ADR-002 — Claim decomposition with per-atom verdicts
+
+**Context.** Real health claims are compound. "Green tea boosts metabolism and
+melts belly fat in two weeks" bundles a causal claim, a stronger causal claim,
+and a temporal claim. A single verdict over the whole sentence is *guaranteed* to
+be wrong for at least one part.
+
+**Options considered.**
+1. Evaluate the whole claim as one unit, one verdict.
+2. Decompose into atomic testable facts, evaluate each **independently**.
+
+**Decision.** Decompose every claim into atomic facts and assign a verdict
+**per atom** (inspired by EVICheck, IJCAI 2025).
+
+**Why.** A compound claim needs compound evaluation. Decomposition (a) produces
+honest, granular verdicts — one atom can be *Strongly Supported* while another is
+*Strongly Refuted*; (b) makes the reasoning legible — the user sees exactly which
+part fails; and (c) is the foundation of our token efficiency, since we reason
+over short atoms instead of raw walls of text (an 80–90% input reduction
+downstream). We enforce this structurally: a found claim **must** decompose into
+≥1 atom (a Pydantic invariant), so the architecture can't silently skip
+decomposition.
+
+---
+
+## ADR-003 — LLM-agnostic provider abstraction
+
+**Context.** Frontier models ship every few months, prices shift, and the best
+model for a task changes. If pipeline code imports a specific SDK directly,
+swapping models means touching every call site.
+
+**Options considered.**
+1. Call the Anthropic SDK directly throughout the pipeline.
+2. A thin provider abstraction — one `llm_call(...)` entry point, providers behind
+   an interface, models named only in config.
+
+**Decision.** All LLM access goes through `config/providers.py`. Pipeline code
+never imports `anthropic` / `openai`; it asks for a model *tier*.
+
+**Why.** The pipeline logic is the durable asset; the LLM is a **replaceable
+component**. Treating it as swappable infrastructure means: adopting a new model
+is a one-file config change; adding a provider (OpenAI, local model) is one new
+`LLMProvider` subclass with zero pipeline edits; and we can A/B providers per
+tier. This also keeps a clean seam for testing — the offline suite stubs the
+provider and never spends a token.
+
+---
+
+## ADR-004 — Seven categorical verdicts over binary true/false
+
+**Context.** Evidence is rarely a clean yes/no. Sometimes it's mixed, sometimes
+thin, sometimes the claim is too vague to test at all. A binary label forces all
+of that nuance into two buckets.
+
+**Options considered.**
+1. Binary: true / false.
+2. Ternary: supported / refuted / not enough evidence (AVeriTeC's core set).
+3. A richer **seven-category** scale spanning supported → refuted, plus
+   conflicting, insufficient, and too-vague.
+
+**Decision.** Seven categorical verdicts: *Strongly Supported, Partially
+Supported, Insufficient Evidence, Conflicting Evidence, Partially Refuted,
+Strongly Refuted, Too Vague to Evaluate*.
+
+**Why.** Categories map to how people actually reason about claims (building on
+AVeriTeC's categorical scheme — Supported / Refuted / Not Enough Evidence /
+Conflicting). Binary is dishonest for the common "partly true, partly
+overstated" case. *Conflicting Evidence* explicitly captures cherry-picking;
+*Insufficient Evidence* and *Too Vague to Evaluate* let the system admit the
+limits of what it can judge instead of forcing a false verdict. Crucially, these
+are still **categories, not numbers** (per ADR-001) — graded, but not a fake
+precision score.
+
+---
+
+## ADR-005 — Start with the health domain as the vertical
+
+**Context.** Misinformation spans politics, finance, science, health, and more.
+A general-purpose checker is tempting but spreads the evidence problem thin.
+
+**Options considered.**
+1. Build a domain-general fact-checker.
+2. Specialize in one high-stakes vertical first.
+
+**Decision.** Start narrow: **health claims**.
+
+**Why.** Health is where (a) the harm is direct and personal, (b) high-quality,
+*structured*, *free* evidence exists (PubMed, Cochrane, WHO, CDC) — which the
+whole zero-token retrieval strategy depends on, and (c) source-quality tiers are
+unusually clear-cut (a meta-analysis genuinely outranks a blog). A general
+checker has no equivalent of PubMed. Nailing one vertical with a real evidence
+backbone beats a shallow generalist, and the pipeline architecture generalizes to
+other verticals later.
+
+---
+
+## ADR-006 — PubMed + Qdrant for evidence, not general web search
+
+**Context.** Stage 3 needs evidence for each atomic fact. The default instinct is
+to web-search and feed results to the LLM.
+
+**Options considered.**
+1. LLM-powered web search / retrieval (LLM "looks things up").
+2. A curated medical corpus in a vector DB (Qdrant), sourced from PubMed/WHO/CDC/
+   Cochrane, with web search (Tavily) only as supplement.
+
+**Decision.** Curated corpus + **Qdrant vector search** as the primary evidence
+source; PubMed via Biopython; Tavily only to fill gaps.
+
+**Why.** Three reasons. **Quality:** PubMed/Cochrane/WHO are exactly the
+high-tier sources our verdicts should rest on — general web search surfaces SEO
+spam alongside science. **Cost:** vector search and these APIs are *free and use
+zero LLM tokens*; LLM-powered retrieval burns premium tokens to do worse lookup.
+**Control:** a curated, tiered corpus lets us weight evidence by source quality
+(ADR-007), which an opaque web search can't. We spend tokens on *reasoning*, not
+on *finding*.
+
+---
+
+## ADR-007 — Source quality tiers
+
+**Context.** If all retrieved evidence is treated equally, ten low-quality blog
+posts can numerically drown out one Cochrane review.
+
+**Options considered.**
+1. Treat all sources equally (count/relevance only).
+2. Tag every source with a quality tier and weight verdicts accordingly.
+
+**Decision.** A four-tier hierarchy (Tier 1 systematic reviews/guidelines → Tier
+4 general web), with Tier 4 used for context only, never as evidence.
+
+**Why.** Evidence quality *is* the substance of a health verdict. A systematic
+review and a wellness blog are not the same kind of object, and a credible system
+has to say so. Tiering lets a single Tier-1 meta-analysis outweigh a pile of
+Tier-3/4 articles, and lets the dossier show *why* a verdict leans the way it does
+(via tier badges on each cited source). It also guards against the failure mode
+where SEO volume beats scientific quality.
+
+---
+
+## ADR-008 — Two-tier model routing
+
+**Context.** Using the most capable (expensive) model for every stage is simplest
+but wasteful — most stages don't need deep reasoning.
+
+**Options considered.**
+1. One premium model for the whole pipeline.
+2. One cheap model for the whole pipeline.
+3. **Route by task:** cheap model for mechanical work, premium model only where
+   reasoning depth changes the answer.
+
+**Decision.** Two tiers — **lightweight** (Haiku) for claim extraction and
+classification; **premium** (Sonnet) for evidence evaluation and verdict
+generation.
+
+**Why.** Extraction and classification are pattern tasks a small model does well;
+verdict generation is where reasoning quality actually matters. Routing by need
+keeps 60–70% of the pipeline on the cheap tier without sacrificing verdict
+quality — a large cost reduction for a consumer-scale tool. The tier is just a
+config key, so re-balancing later is trivial.
+
+---
+
+## ADR-009 — Soft cost guardrails over hard limits
+
+**Context.** A token budget is needed to prevent runaway cost. But a hard cap can
+abandon a half-finished dossier mid-pipeline, wasting everything already spent.
+
+**Options considered.**
+1. Hard limit: refuse all calls once the budget is hit.
+2. No limit: just log usage.
+3. **Soft guardrail:** raise a catchable `BudgetWarning` at the budget line; let
+   the caller decide to stop or override.
+
+**Decision.** A soft daily budget (`DAILY_TOKEN_BUDGET`, default 500k) enforced in
+`llm_call`, raising a catchable `BudgetWarning`; usage tracked in
+`daily_usage.json`.
+
+**Why.** Cost control shouldn't destroy work in progress. The soft model surfaces
+the overage loudly (it's an `Exception`, not a silent warning), records every
+call's true cost, and hands the continue/stop decision to the caller
+(`allow_over_budget=True` to proceed). A call that *crosses* the line still
+returns its result (already paid for) and warns; only the *next* call is gated.
+This gives budget visibility and protection without the brittleness of a hard
+kill-switch.
+
+---
+
+## ADR-010 — Script-first development, FastAPI later
+
+**Context.** The end product is a web app with an API. It's tempting to start
+with the web framework in place.
+
+**Options considered.**
+1. Build FastAPI + frontend from day one.
+2. Build the pipeline as a plain script/CLI first; wrap it in FastAPI in weeks
+   9–10.
+
+**Decision.** Script-first. `main.py` is a CLI orchestrator now; the HTTP layer
+comes after the pipeline is proven.
+
+**Why.** The hard, novel problem is the *pipeline* (decomposition, retrieval,
+verdicts) — not request routing. Building the web layer first would mean
+designing endpoints around stages that don't exist yet. A CLI gives the fastest
+iteration loop, the simplest tests, and a clean separation: when the pipeline is
+solid, FastAPI just calls `check_claim(...)`. The orchestrator's function
+signature is already shaped to drop into a request handler unchanged.

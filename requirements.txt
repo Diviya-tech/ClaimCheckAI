@@ -1,0 +1,23 @@
+# ClaimCheck AI — Python dependencies
+# Pin major versions loosely; lock exact versions later with a lockfile.
+
+# --- LLM providers (accessed only via config/providers.py abstraction) ---
+anthropic>=0.40.0          # Claude API SDK (primary provider)
+openai>=1.0.0              # Optional second provider, wired in later
+
+# --- Input normalization ---
+trafilatura>=1.8.0         # URL article body extraction
+yt-dlp>=2024.1.0           # Video download (week 4)
+
+# --- Evidence retrieval (weeks 5-6) ---
+llama-index>=0.10.0        # RAG orchestration
+qdrant-client>=1.7.0       # Vector DB client
+biopython>=1.83            # PubMed API access (Bio.Entrez)
+tavily-python>=0.3.0       # Supplementary web search
+
+# --- Data validation & config ---
+pydantic>=2.5.0            # Schemas: Claim, AtomicFact, Evidence, Verdict, Dossier
+python-dotenv>=1.0.0       # Load API keys from .env
+
+# --- Testing ---
+pytest>=8.0.0
