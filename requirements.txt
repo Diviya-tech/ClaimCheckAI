@@ -8,6 +8,10 @@ openai>=1.0.0              # Optional second provider, wired in later
 # --- Input normalization ---
 trafilatura>=1.8.0         # URL article body extraction
 yt-dlp>=2024.1.0           # Video download (week 4)
+openai-whisper>=20231117   # Local speech-to-text for video audio (week 4)
+ffmpeg-python>=0.2.0       # Audio extraction + key-frame grabbing (week 4)
+# NOTE: the ffmpeg *binary* must also be installed on the system (not pip):
+#   Windows: winget install ffmpeg   |   macOS: brew install ffmpeg   |   Linux: apt install ffmpeg
 
 # --- Evidence retrieval (weeks 5-6) ---
 llama-index>=0.10.0        # RAG orchestration

@@ -22,6 +22,12 @@ load_dotenv()
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 TAVILY_API_KEY: str | None = os.getenv("TAVILY_API_KEY")
 
+# NCBI / PubMed (Bio.Entrez). NCBI *requires* an email on every request so they
+# can contact you about misuse before blocking. An API key is optional but lifts
+# the rate limit from 3 to 10 requests/second.
+ENTREZ_EMAIL: str = os.getenv("ENTREZ_EMAIL", "claimcheck-ai@example.com")
+NCBI_API_KEY: str | None = os.getenv("NCBI_API_KEY")
+
 
 # --------------------------------------------------------------------------- #
 # Source quality tiers
@@ -46,6 +52,89 @@ SOURCE_TIER_LABELS: dict[SourceTier, str] = {
     SourceTier.TIER_3: "Credentialed health journalism & university health centers",
     SourceTier.TIER_4: "General web, blogs & social media (context only, not evidence)",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Source domain -> tier mapping (used by core/source_classifier.py)
+# --------------------------------------------------------------------------- #
+# Registered domains map deterministically to a tier. Matching is done on the
+# *registrable* host and its subdomains (so "my.clevelandclinic.org" matches
+# "clevelandclinic.org"). Anything unrecognized falls through to Tier 4.
+#
+# NOTE on PubMed: a PubMed article is Tier 1 *only* when it is a systematic
+# review or meta-analysis; otherwise it is a Tier 2 peer-reviewed study. The
+# classifier promotes pubmed.ncbi.nlm.nih.gov to Tier 1 based on publication
+# type, so the static map lists it at its Tier 2 baseline.
+TIER_1_DOMAINS: frozenset[str] = frozenset(
+    {
+        "cochranelibrary.com",
+        "cochrane.org",
+        "who.int",
+        "cdc.gov",
+    }
+)
+
+# Major medical institutions, national health bodies, and the NCBI repositories
+# (PubMed / PMC). Peer-reviewed primary research / authoritative health info.
+MEDICAL_INSTITUTION_DOMAINS: frozenset[str] = frozenset(
+    {
+        "pubmed.ncbi.nlm.nih.gov",
+        "pmc.ncbi.nlm.nih.gov",
+        "ncbi.nlm.nih.gov",
+        "nih.gov",
+        "medlineplus.gov",
+        "mayoclinic.org",
+        "clevelandclinic.org",
+        "nhs.uk",
+        "hopkinsmedicine.org",
+    }
+)
+
+# Academic publishers & journal platforms. A *regular* article here is Tier 2; a
+# systematic review or meta-analysis is promoted to Tier 1 by the classifier
+# (via publication-type / title detection) regardless of which publisher hosts it.
+# Listed by registrable domain so subdomains match (e.g. link.springer.com,
+# onlinelibrary.wiley.com, journals.plos.org, academic.oup.com).
+ACADEMIC_PUBLISHER_DOMAINS: frozenset[str] = frozenset(
+    {
+        "frontiersin.org",     # Frontiers
+        "sciencedirect.com",   # Elsevier / ScienceDirect
+        "springer.com",        # Springer (link.springer.com)
+        "wiley.com",           # Wiley (onlinelibrary.wiley.com)
+        "bmj.com",             # BMJ
+        "jamanetwork.com",     # JAMA Network
+        "thelancet.com",       # The Lancet
+        "nature.com",          # Nature
+        "plos.org",            # PLOS (journals.plos.org)
+        "oup.com",             # Oxford Academic (academic.oup.com)
+        "tandfonline.com",     # Taylor & Francis
+        "sagepub.com",         # SAGE (journals.sagepub.com)
+        "peerj.com",           # PeerJ
+        "mdpi.com",            # MDPI
+    }
+)
+
+TIER_2_DOMAINS: frozenset[str] = MEDICAL_INSTITUTION_DOMAINS | ACADEMIC_PUBLISHER_DOMAINS
+
+TIER_3_DOMAINS: frozenset[str] = frozenset(
+    {
+        "statnews.com",
+        "health.harvard.edu",
+        "medpagetoday.com",
+        "kff.org",
+        "healthcare.utah.edu",
+    }
+)
+
+# Health/medical domains the web search should *prioritize* (re-rank to the top).
+# Union of every tiered domain (institutions + academic publishers) plus a few
+# more authoritative health/government sources.
+MEDICAL_DOMAINS: frozenset[str] = (
+    TIER_1_DOMAINS
+    | TIER_2_DOMAINS
+    | TIER_3_DOMAINS
+    | frozenset({"medlineplus.gov", "cancer.gov", "fda.gov", "nibib.nih.gov"})
+)
 
 
 # --------------------------------------------------------------------------- #

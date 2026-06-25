@@ -42,6 +42,20 @@ class SourceFormat(str, Enum):
     VIDEO = "video"
 
 
+class EvidenceStance(str, Enum):
+    """How a single piece of evidence relates to the atomic fact it was retrieved for.
+
+    Retrieval itself leaves every piece NEUTRAL — determining whether evidence
+    actually supports or refutes a fact requires reasoning against the fact, which
+    is the verdict engine's job (weeks 7-8). The field exists here so retrieval can
+    carry the placeholder and the verdict engine can fill it in.
+    """
+
+    SUPPORTING = "supporting"
+    OPPOSING = "opposing"
+    NEUTRAL = "neutral"
+
+
 class Verdict(str, Enum):
     """The seven categorical verdicts. No numeric scores."""
 
@@ -115,7 +129,11 @@ class ClaimExtractionResult(BaseModel):
 class Evidence(BaseModel):
     """A single piece of retrieved evidence relevant to an atomic fact."""
 
-    content: str = Field(..., description="The evidence text / summary.")
+    content: str = Field(..., description="The full evidence text (e.g. a PubMed abstract).")
+    summary: str = Field(
+        default="",
+        description="Compressed 2-3 sentence summary of `content`, for token efficiency.",
+    )
     source_url: str = Field(..., description="Canonical URL of the source.")
     source_name: str = Field(..., description="Human-readable source name (e.g. 'Cochrane').")
     source_tier: int = Field(..., ge=1, le=4, description="Source quality tier, 1 (best) to 4.")
@@ -123,11 +141,39 @@ class Evidence(BaseModel):
         ...,
         ge=0.0,
         le=1.0,
-        description="Retrieval relevance (e.g. vector similarity), 0-1.",
+        description="Retrieval relevance (vector/lexical similarity or search score), 0-1.",
+    )
+    evidence_stance: EvidenceStance = Field(
+        default=EvidenceStance.NEUTRAL,
+        description="Supporting / opposing / neutral relative to the fact (set by the verdict engine).",
     )
     publication_date: datetime | None = Field(
         default=None,
         description="When the source was published, if known.",
+    )
+
+
+class FactEvidence(BaseModel):
+    """An atomic fact paired with the evidence retrieved for it.
+
+    The evidence retriever returns one of these per atomic fact (rather than a
+    flat list of Evidence) so the verdict engine can evaluate each fact against
+    exactly the evidence gathered for it. `evidence` is already ranked and capped
+    to the top few results.
+    """
+
+    atomic_fact: AtomicFact = Field(..., description="The fact this evidence was gathered for.")
+    evidence: list[Evidence] = Field(
+        default_factory=list,
+        description="Top-ranked evidence for the fact (best first).",
+    )
+    retrieval_note: str = Field(
+        default="",
+        description=(
+            "Set to 'insufficient evidence found' when fewer than 2 sufficiently "
+            "relevant items survived the relevance floor — so the verdict engine "
+            "doesn't mistake a thin, noisy result set for real evidence."
+        ),
     )
 
 

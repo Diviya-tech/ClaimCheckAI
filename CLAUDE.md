@@ -85,5 +85,17 @@ claimcheck-ai/
 - Weeks 9-10: Frontend (Next.js) + wrap pipeline in FastAPI
 - Weeks 11-12: Testing, edge cases, iteration, semantic caching
 
-## Current Phase: Week 1
-Focus: Build claim extractor with structured output, text input handler, URL input handler, LLM abstraction layer with soft cost guardrails, and Pydantic data models.
+## Current Phase: Weeks 5-6
+Focus: Evidence retrieval — the engine that finds evidence for/against each atomic fact. This stage spends ZERO LLM tokens on the actual searching; the lightweight LLM is used ONLY to turn an atomic fact into effective search queries. Components:
+- `sources/pubmed.py` — Bio.Entrez client (`search_pubmed`); esearch -> efetch, parses title/abstract/authors/date/PMID/journal, builds an extractive 2-3 sentence summary (no LLM), paces requests to NCBI's rate limit, raises `PubMedError` on failure (empty results are not an error).
+- `sources/web_search.py` — Tavily client (`search_web`); re-ranks results so medical/health domains (WHO, CDC, Mayo, Cleveland Clinic, NIH, Cochrane, NHS) float to the top; raises `WebSearchError` if the key is missing.
+- `core/source_classifier.py` — `classify_source(url, source_name, publication_types)` -> tier (1-4) + justification, via domain matching + PubMed publication-type detection (meta-analysis/systematic review -> Tier 1, else Tier 2).
+- `core/evidence_retriever.py` — orchestrator `retrieve_evidence(atomic_facts)`; per fact: lightweight-LLM query generation (with a token-free fallback to the raw fact text), PubMed (primary) + Tavily (supplementary) search, source classification, ranking that blends lexical relevance with a tier bonus, URL de-dup, top 3-5 kept. Returns `list[FactEvidence]` (each pairs a fact with its ranked `Evidence`). Qdrant vector search slots in here in a later iteration (the 0-1 relevance interface stays the same).
+- `schemas/models.py` — `Evidence` gained `summary` + `evidence_stance` (an `EvidenceStance` enum; retrieval leaves it NEUTRAL — the verdict engine assigns supporting/opposing later); added the `FactEvidence` container.
+- `main.py` — after extraction, runs retrieval and prints evidence per atomic fact grouped by tier badges `[T1]`–`[T4]`; `--no-evidence` opts out.
+- New env vars: `ENTREZ_EMAIL` (required by NCBI), optional `NCBI_API_KEY`.
+
+Completed:
+- Weeks 1-2: Claim extractor (atomic-fact decomposition + classification), text + URL input handlers, LLM-agnostic provider abstraction with two-tier routing and soft cost guardrails, Pydantic data models with the claim_found <-> atomic_facts invariant, and an offline test suite.
+- Week 3: Screenshot input (`input/image_input.py`) — Claude vision reads the claim from an image while ignoring usernames/hashtags/UI/comments; provider abstraction extended with a provider-neutral `images` parameter; `--image` flag. Live-verified.
+- Week 4: Video input (`input/video_input.py`) — video URL -> yt-dlp download -> local Whisper ("base") transcription + vision on evenly-spaced key frames -> de-duplicated merge of spoken + on-screen text; checks for the ffmpeg binary; cleans up temp files; `--video` flag.

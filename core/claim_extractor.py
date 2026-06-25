@@ -44,6 +44,16 @@ Given a piece of text, do the following:
    claim is real but you genuinely cannot break it into anything testable, emit a
    single atomic fact that restates the core assertion.
 
+   SELF-CONTAINED: Each atomic fact must be self-contained — include the subject,
+   substance, or intervention in EVERY fact. A fact must be independently
+   understandable without reading the other facts, because each one is searched
+   and evaluated on its own. Never use bare pronouns or references like "it",
+   "they", "this", "the effect", or "the result" without specifying what they
+   refer to. For example, from "Cumin water melts belly fat in two weeks" do NOT
+   emit a temporal fact "the effect occurs within two weeks" — emit "Cumin water
+   produces belly-fat loss within two weeks". A reader (or a search engine) must
+   never have to guess what the fact is about.
+
    HEDGED & LONG-FORM SOURCES: Articles and balanced journalism often wrap claims
    in uncertainty ("may help", "might reduce", "evidence is mixed", "modest
    effects", "some studies suggest"). Do NOT fold that hedging into a summary

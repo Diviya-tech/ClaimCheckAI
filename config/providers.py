@@ -99,8 +99,15 @@ class LLMProvider(ABC):
         model: str,
         max_tokens: int,
         response_schema: dict[str, Any] | None,
+        images: list[dict[str, str]] | None = None,
     ) -> tuple[str | dict[str, Any], int, int]:
         """Run one completion.
+
+        Args:
+            images: Optional provider-neutral image inputs, each a dict with
+                ``media_type`` (e.g. "image/png") and base64 ``data``. The
+                provider translates these into its own vision format. None for
+                text-only calls.
 
         Returns (content, input_tokens, output_tokens) where `content` is a
         plain string, or — when `response_schema` is provided — the validated
@@ -130,11 +137,30 @@ class AnthropicProvider(LLMProvider):
         model: str,
         max_tokens: int,
         response_schema: dict[str, Any] | None,
+        images: list[dict[str, str]] | None = None,
     ) -> tuple[str | dict[str, Any], int, int]:
+        # Build the user message content. With images, content becomes a list of
+        # image blocks followed by the text block; without, it's a plain string.
+        if images:
+            user_content: Any = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img["media_type"],
+                        "data": img["data"],
+                    },
+                }
+                for img in images
+            ]
+            user_content.append({"type": "text", "text": prompt})
+        else:
+            user_content = prompt
+
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": user_content}],
         }
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -203,6 +229,7 @@ def llm_call(
     system_prompt: str | None = None,
     model_tier: str = "premium",
     response_schema: dict[str, Any] | None = None,
+    images: list[dict[str, str]] | None = None,
     allow_over_budget: bool = False,
 ) -> str | dict[str, Any]:
     """Run a single LLM completion through the configured provider.
@@ -213,6 +240,8 @@ def llm_call(
         model_tier: "premium" (Sonnet, reasoning) or "lightweight" (Haiku, cheap).
         response_schema: If given, a JSON Schema; the result is returned as a
             validated dict via tool_use instead of free text.
+        images: Optional provider-neutral image inputs for vision calls, each a
+            dict with ``media_type`` and base64 ``data``.
         allow_over_budget: If True, skip the soft budget check and proceed even
             when the daily budget is already exhausted.
 
@@ -255,6 +284,7 @@ def llm_call(
         model=str(tier_cfg["model"]),
         max_tokens=int(tier_cfg["max_tokens"]),
         response_schema=response_schema,
+        images=images,
     )
 
     new_total = _record_usage(input_tokens, output_tokens)
