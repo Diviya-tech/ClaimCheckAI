@@ -85,11 +85,13 @@ maps directly: agreement across independent high-tier sources (a Cochrane review
 *and* a WHO guideline *and* multiple PubMed studies) is a far stronger signal than
 ten articles echoing one press release.
 
-**What ClaimCheck took.** The principle informs two things: our **source-quality
-tiers** (weight independent, high-tier convergence; discount echo-chamber volume —
-**ADR-007**), and the future **rhetorical / cherry-picking detection**, which
-flags claims that lean on a single cherry-picked source against the broader
-consensus.
+**What ClaimCheck took.** The principle informs two things, both now live: our
+**source-quality tiers** (the verdict engine is prompted to weight independent,
+high-tier *convergence* and discount echo-chamber volume — **ADR-007**), and the
+**rhetorical red-flag detection** shipped in the verdict engine (weeks 7–8), which
+surfaces manipulation patterns — conspiracy framing, guaranteed outcomes,
+anecdote-as-proof — as dossier context, kept structurally separate from the
+evidence verdict so form and substance are judged independently (**ADR-013**).
 
 ---
 
@@ -103,7 +105,7 @@ takes one core idea from each:
 | **AVeriTeC** | Categorical verdicts with honest "can't tell" + conflicting states | 7-category verdict scale (ADR-004) |
 | **EVICheck** | Atomic decomposition + independent per-unit evaluation | The claim-extractor → per-atom verdict engine (ADR-002) |
 | **CHI 2025** | Reject numerical scores; show evidence and reasoning | The Evidence Dossier output format (ADR-001) |
-| **Community Notes** | Convergence across diverse sources as the credibility signal | Source-quality tiers + cherry-picking flags (ADR-007) |
+| **Community Notes** | Convergence across diverse sources as the credibility signal | Source-quality tiers (ADR-007) + rhetorical red-flag detection (ADR-013) |
 
 The result is the combined thesis stated in the README:
 

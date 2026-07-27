@@ -239,3 +239,105 @@ designing endpoints around stages that don't exist yet. A CLI gives the fastest
 iteration loop, the simplest tests, and a clean separation: when the pipeline is
 solid, FastAPI just calls `check_claim(...)`. The orchestrator's function
 signature is already shaped to drop into a request handler unchanged.
+
+---
+
+## ADR-011 — One batched verdict call over per-atom calls
+
+**Context.** Stage 4 must evaluate every atomic fact against its own evidence.
+The straightforward implementation is one premium LLM call per atom.
+
+**Options considered.**
+1. One premium call per atomic fact.
+2. One **batched** premium call covering all atoms (each with its evidence) plus
+   the claim-level rhetorical analysis.
+
+**Decision.** A single batched call — `evaluate(...)` — returns verdicts for every
+atom *and* the rhetorical flags in one round-trip.
+
+**Why.** Per-atom calls re-pay the (large) system prompt and shared claim context
+on every fact; batching amortizes them across all atoms, which is a real token
+saving on a multi-atom claim (and the whole project is organized around token
+efficiency). It also lets the model reason about the atoms *together* — e.g.
+recognizing that a causal atom is supported while its temporal sibling is not. The
+risk of batching (a malformed or partial response corrupting everything) is
+contained by ADR-012's defensive mapping. The verdict/stance `enum`s in the
+output schema are generated from the Pydantic enums, so the batch schema can never
+silently drift from the models.
+
+---
+
+## ADR-012 — Drive result assembly off the input facts, not the model output
+
+**Context.** A batched call returns a JSON array of per-fact verdicts. Nothing
+*guarantees* the model returns exactly one entry per fact, in order — it might
+skip a fact, reorder them, duplicate one, emit an out-of-range evidence index, or
+return a verdict string outside the seven categories.
+
+**Options considered.**
+1. Trust the model output shape; map it directly to `AtomicVerdict`s.
+2. Index the model output by `fact_index`, then **iterate over the input facts**
+   and look each one up, with safe defaults for anything missing or malformed.
+
+**Decision.** Option 2 — the loop is driven by the input facts, so the result
+always has exactly one verdict per fact, in the original order.
+
+**Why.** The verdict stage is the trust core of the product; a silently dropped or
+mis-indexed fact would mean a dossier that looks complete but isn't. Making the
+input the source of truth turns every model misbehavior into a *safe, visible*
+default: a fact with no returned verdict becomes `Insufficient Evidence` (evidence
+preserved as context), an unknown verdict string coerces to `Insufficient`, and a
+non-budget LLM error degrades the whole stage to `Insufficient` rather than
+crashing. `BudgetWarning` is the one exception that propagates — a cost decision
+belongs to the caller (ADR-009), not to a silent fallback.
+
+---
+
+## ADR-013 — Rhetorical flags decoupled from evidence verdicts
+
+**Context.** A claim can be manipulative in *form* ("doctors don't want you to
+know this ONE trick that MELTS fat!") while being partly true in *substance* — and
+vice versa. The rhetorical analysis and the evidence verdict answer different
+questions.
+
+**Options considered.**
+1. Fold rhetoric into the verdict — let manipulative framing push a fact toward
+   "Refuted".
+2. Detect rhetorical patterns **separately** and present them as context that
+   never changes the evidence verdict.
+
+**Decision.** Rhetorical red flags are detected (in the same batched call, for
+token efficiency) but kept in their own `RhetoricalFlag` list on the dossier,
+structurally separate from the per-atom verdicts.
+
+**Why.** Conflating the two would make the system dishonest in both directions: it
+would penalize a soberly-worded false claim too little and a sensationally-worded
+true claim too much. Keeping them separate lets the dossier say two true things at
+once — "the evidence partially supports this" *and* "the way it's phrased is
+manipulative" — which is exactly the nuance a consumer needs. Each flag carries
+the triggering excerpt so the reader can see the pattern for themselves (the
+"show me the work" principle, ADR-001, applied to rhetoric).
+
+---
+
+## ADR-014 — Narrative summary as a separate call with a deterministic fallback
+
+**Context.** The dossier ends with a plain-language summary for a non-expert. It
+needs the *finalized* verdicts, and it's the last thing produced — after the
+expensive verdict call has already been paid for.
+
+**Options considered.**
+1. Fold the narrative into the batched verdict call.
+2. A separate premium call in the dossier builder, with a deterministic fallback
+   if it fails.
+
+**Decision.** A second premium call writes the narrative; if it fails or the
+budget is exhausted, the builder falls back to a summary assembled deterministically
+from the verdict tally.
+
+**Why.** Separating presentation (stage 5) from analysis (stage 4) keeps the
+verdict logic independent of how it's rendered and lets the summary reason over
+the *decided* verdicts rather than guessing alongside them. The fallback is the
+important half: the verdicts are the costliest artifact in the pipeline, so a
+failed *summary* call must never discard them — a dossier is always produced, just
+with a plainer summary. This mirrors the "degrade, don't crash" stance of ADR-009.

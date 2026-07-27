@@ -27,7 +27,7 @@ tested, or swapped in isolation.
         │
         ▼
  ┌─────────────────────┐
- │ 3. Evidence         │  → dict[AtomicFact, list[Evidence]]
+ │ 3. Evidence         │  → list[FactEvidence]
  │    Retriever        │     (0 LLM tokens)
  └─────────────────────┘
         │
@@ -47,11 +47,15 @@ output and produces the next. The typed contracts are the Pydantic models in
 [`schemas/models.py`](../schemas/models.py):
 
 ```
-str → ClaimExtractionResult → Evidence[] → AtomicVerdict[] → Dossier
+str → ClaimExtractionResult → FactEvidence[] → AtomicVerdict[] → Dossier
 ```
 
-The orchestrator ([`main.py`](../main.py)) wires the stages together. Today
-(Week 1) it runs stages 1–2; stages 3–5 land in later weeks.
+The orchestrator ([`main.py`](../main.py)) wires the stages together. **All five
+stages run today** — `python main.py --text "…"` takes a claim through
+extraction, retrieval, evaluation, and dossier assembly, and prints the finished
+dossier. A `FactEvidence` pairs each atomic fact with the ranked evidence
+retrieved for it, so stage 4 can evaluate every fact against exactly its own
+evidence.
 
 ---
 
@@ -199,13 +203,40 @@ Tier 4 is captured for context but never treated as evidence for a verdict.
 
 ---
 
-## 5. Verdict Engine & Dossier Builder (Stages 4–5) *(weeks 7–8)*
+## 5. Verdict Engine (Stage 4)
 
-### Verdict Engine
+**Goal:** evaluate each atomic fact against *its own* retrieved evidence and
+assign one of seven categorical verdicts, with transparent, evidence-citing
+reasoning — plus detect rhetorical manipulation in the original claim.
 
-For each atomic fact, the **premium** model tier evaluates the fact against its
-retrieved evidence and assigns one of seven categorical verdicts, with transparent
-reasoning and the supporting/opposing evidence attached.
+### One batched premium call
+
+Every atomic fact, all of its evidence, and the claim-level rhetorical analysis
+go to the **premium** tier in a **single batched call** (`evaluate(...)`). This is
+a deliberate token move: one call amortizes the system prompt and shared claim
+context across all atoms instead of paying per-fact. The call is forced through
+structured output (§6), and its `enum` values for both the verdict and the
+evidence stance are generated *from the Pydantic enums* so the schema can never
+drift from the models.
+
+`evaluate_claim(...)` is the spec'd entry point returning `list[AtomicVerdict]`;
+`evaluate(...)` returns a richer `ClaimEvaluation` (verdicts **plus** rhetorical
+flags) so the dossier builder gets the flags without a second call.
+
+### What it produces per fact
+
+1. **Evidence stance.** Every retrieved item is classified `supporting`,
+   `opposing`, or `neutral` relative to the fact — this is where the `evidence_stance`
+   placeholder that retrieval left `NEUTRAL` finally gets filled in. Each item
+   lands in exactly one of three buckets on the `AtomicVerdict`
+   (`supporting_evidence` / `opposing_evidence` / `neutral_evidence`), so the
+   dossier can cite every source with how it bore on the verdict.
+2. **Tier-weighted, diversity-aware reasoning.** The prompt instructs the model
+   to weigh higher tiers more (a single T1 meta-analysis outweighs a stack of
+   T3/T4), to treat T4 as context only, and to note whether independent
+   institutions *converge* (stronger) or a claim rests on a lone source (weaker).
+3. **A categorical verdict** — one of the seven below.
+4. **A reasoning string** citing specific evidence by source and tier.
 
 | Verdict | Meaning |
 |---------|---------|
@@ -217,16 +248,53 @@ reasoning and the supporting/opposing evidence attached.
 | `Strongly Refuted` | High-tier evidence consistently contradicts the fact. |
 | `Too Vague to Evaluate` | The fact isn't specific enough to test. |
 
-A **rhetorical pattern detector** (additive module) flags manipulation patterns
-("doctors don't want you to know," false urgency, etc.) without affecting the
-evidence verdicts.
+### Rhetorical red-flag detection
 
-### Dossier Builder
+In the *same* batched call, the engine inspects the **original claim text** for
+manipulation patterns — guaranteed/absolute outcomes, conspiracy framing
+("doctors don't want you to know"), appeal to nature, anecdote-as-proof, false
+urgency, and emotional manipulation — returning a list of structured
+`RhetoricalFlag`s (pattern + explanation + the triggering excerpt). Flags describe
+**how the claim is argued, not whether it is true**; they are surfaced in the
+dossier as context and never alter the evidence verdict.
 
-Assembles the final `Dossier`: a per-atom verdict table, cited evidence with tier
-badges, rhetorical flags, and a narrative summary. **Every dossier gets a UUID**
-at construction (`default_factory=uuid.uuid4`) so it can be shared and referenced
+### Defensive by construction
+
+The mapping from model output back to typed models is driven off the *input*
+facts, not the model's output, so the result **always has exactly one verdict per
+fact, in order**, even if the model skips, reorders, or duplicates entries — a
+missing fact defaults to `Insufficient Evidence` with its evidence preserved as
+context. Unknown verdict/stance strings coerce to safe defaults. A non-budget LLM
+error degrades the whole stage to `Insufficient Evidence` rather than crashing the
+run; `BudgetWarning` alone propagates, so the caller makes a deliberate spend
+decision (per ADR-009).
+
+---
+
+## 5b. Dossier Builder (Stage 5)
+
+Assembles the final `Dossier`: the original input, a per-atom verdict table, the
+cited evidence with tier badges and stance markers, the rhetorical flags, and a
+plain-language **narrative summary**. **Every dossier gets a UUID and a UTC
+timestamp** at construction (`default_factory`) so it can be shared and referenced
 later.
+
+- **Narrative summary** is a second **premium** call — the one place the dossier
+  builder reasons — turning the decided verdicts into 3–6 sentences a non-expert
+  can follow, faithful to the individual verdicts (it won't upgrade *Insufficient
+  Evidence* into a clean yes/no).
+- **Graceful degradation:** if that call fails or the budget is exhausted, the
+  builder falls back to a deterministic summary assembled from the verdict tally.
+  The verdicts — the expensive part — are never discarded, so a dossier is
+  *always* produced.
+- **`format_dossier(dossier)`** renders the whole thing as clean terminal text:
+  tier badges `[T1]`–`[T4]`, stance markers `(+)` / `(-)` / `(.)`, and a
+  per-verdict cue. `main.py --json` additionally emits the dossier as JSON for the
+  coming FastAPI layer.
+
+This split — analysis in stage 4, presentation + summary in stage 5 — keeps the
+verdict logic independent of how it's rendered, and means two premium calls per
+full run (batched verdicts, then narrative).
 
 ---
 
@@ -325,12 +393,15 @@ Stage-by-stage token profile:
 |-------|----------|-----------|
 | 1. Input Normalizer | none (vision only for images) | ~0 (text/URL) |
 | 2. Claim Extractor | lightweight | low |
-| 3. Evidence Retriever | **none** | **0** |
-| 4. Verdict Engine | premium | the bulk of spend |
-| 5. Dossier Builder | lightweight / none | low |
+| 3. Evidence Retriever | lightweight (query-gen only) → **none** for search | very low; search is **0** |
+| 4. Verdict Engine | premium (one batched call) | the bulk of spend |
+| 5. Dossier Builder | premium (narrative only) | moderate |
 
-The expensive tier touches exactly one stage — the one where reasoning depth
-actually changes the answer.
+The premium tier touches exactly two stages — evaluating the evidence and writing
+the summary — the two places where reasoning depth actually changes the output.
+Everything else runs on the cheap tier or spends no tokens at all. (Retrieval's
+only LLM use is the lightweight query-generation step, which falls back to the raw
+fact text token-free if the budget is gone.)
 
 ---
 
@@ -379,12 +450,22 @@ call's true cost, and leaves the continue/stop decision to the caller.
 
 ## 9. Testing Strategy
 
-- **Offline-first.** 23 tests run with **no API key** — the LLM layer is stubbed,
-  so CI never spends tokens or flakes on the network.
-- **What's covered:** text normalization, URL validation, Pydantic models and the
-  enforced invariant (both directions), the daily-usage ledger + budget guardrail,
-  and the extractor's structured-output → model mapping (provider monkeypatched).
+- **Offline-first.** **111 tests** run with **no API key** — every LLM call is
+  stubbed via monkeypatch, so CI never spends tokens or flakes on the network.
+- **What's covered, by suite:**
+  - `test_claims.py` — text normalization, URL validation, image/video handlers,
+    the Pydantic models + enforced invariant (both directions), the daily-usage
+    ledger + budget guardrail, and the extractor's structured-output → model
+    mapping (including a guard that the extractor prompt still demands
+    *self-contained* atomic facts).
+  - `test_evidence.py` — PubMed/web result parsing, source-tier classification,
+    the relevance floor, ranking that blends relevance with a tier bonus, and
+    URL de-duplication.
+  - `test_verdicts.py` — stance bucketing, verdict/flag mapping, the defensive
+    fallbacks (missing fact index, unknown verdict string, LLM error →
+    Insufficient, `BudgetWarning` propagation), and dossier assembly + rendering
+    (including the deterministic narrative fallback).
 - **What's deferred:** a 50+ case live corpus of diverse real claims, exercised
-  against the real model once the verdict engine exists.
+  against the real model for end-to-end quality regression.
 
 The principle: a claim-checker is only as trustworthy as its own test suite.

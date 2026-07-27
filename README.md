@@ -4,13 +4,15 @@
 
 **An evidence-evaluation engine for health claims — it decomposes what you see on social media into atomic facts and weighs each one against trusted medical literature.**
 
-![Status](https://img.shields.io/badge/status-Week%201%20complete-brightgreen)
+![Status](https://img.shields.io/badge/status-full%20pipeline%20live%20(wk%201--8)-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-23%20passing-success)
+![Tests](https://img.shields.io/badge/tests-111%20passing-success)
 ![LLM](https://img.shields.io/badge/LLM-agnostic-8A2BE2)
 ![Approach](https://img.shields.io/badge/verdicts-categorical%2C%20not%20scores-orange)
 
 *Not a truth machine. An evidence dossier builder.*
+
+**End to end today:** paste a health claim and get back a full evidence dossier — atomic facts, per-fact categorical verdicts, cited medical literature with source-tier badges, rhetorical red flags, and a plain-language summary.
 
 </div>
 
@@ -133,10 +135,12 @@ This is an **architectural advantage, not a micro-optimization.**
 
 A naive fact-checker stuffs the whole claim, retrieved context, and instructions into one giant LLM call:
 
-| | Tokens per check | How |
+| | Tokens per atomic check | How |
 |---|---|---|
 | **Typical monolithic checker** | ~8,000–12,000 | One big LLM call: claim + 10–15 retrieved chunks + reasoning + output, all premium-tier. |
 | **ClaimCheck AI** | **~2,000–3,000** | Decomposition + free retrieval + compression + filtering + structured output + two-tier routing. |
+
+> These are **per-atomic-fact reasoning targets**, and the architectural point is *where* the tokens go, not a single magic number: retrieval is 0 tokens, extraction/query-gen run on the cheap tier, and premium spend is concentrated in the two reasoning stages. A full multi-atom dossier costs more in absolute terms — a live 2-atom run measured ≈9.6k tokens end to end (batched verdicts + narrative) — but every one of the seven moves below still applies, and the expensive tier still touches only the stages where reasoning changes the answer.
 
 Seven moves get us there:
 
@@ -169,7 +173,7 @@ Each tool was chosen for a *project-specific* reason, not popularity:
 | **yt-dlp + Whisper** | Misinformation is video-native; this pair turns a TikTok/YouTube link into a transcript. |
 | **Tavily** | Purpose-built search API for LLM pipelines — supplementary evidence when the corpus is thin. |
 | **Tavily / free APIs over paid search** | Evidence retrieval must stay token- and dollar-cheap to scale to consumers. |
-| **pytest** | A claim-checker is only as trustworthy as its test suite; 23 offline tests run with no API key. |
+| **pytest** | A claim-checker is only as trustworthy as its test suite; 111 offline tests run with no API key. |
 | **Next.js + Tailwind** (later) | The dossier is visual — tier badges, verdict tables — and deserves a real UI. |
 
 ---
@@ -200,11 +204,15 @@ ClaimCheckAI/
 │   ├── verdict_engine.py       # (wk 7-8) per-atom categorical verdicts
 │   └── dossier_builder.py      # (wk 7-8) assemble the evidence dossier
 │
-├── sources/                    # (wk 5-6) PubMed / WHO / web-search clients
+├── sources/                    # (wk 5-6) PubMed + web-search clients
 ├── schemas/
-│   └── models.py               # Pydantic models: AtomicFact, Evidence, Verdict, Dossier
+│   └── models.py               # Pydantic models: AtomicFact, Evidence, AtomicVerdict,
+│                               #   RhetoricalFlag, Dossier (UUID-stamped)
 ├── tests/
-│   └── test_claims.py          # 23 offline tests (LLM layer stubbed)
+│   ├── test_claims.py          # extraction, input handlers, provider layer
+│   ├── test_evidence.py        # (wk 5-6) retrieval, ranking, source tiers
+│   └── test_verdicts.py        # (wk 7-8) verdict logic, flags, dossier assembly
+│                               #   → 111 offline tests total (LLM layer stubbed)
 ├── data/test_inputs/           # Fixtures for end-to-end testing
 └── docs/
     ├── ARCHITECTURE.md         # Deep technical design
@@ -228,48 +236,98 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Add your API key
-cp .env.example .env             # then edit .env and paste your ANTHROPIC_API_KEY
+# 4. Add your keys
+cp .env.example .env             # then edit .env:
+#   ANTHROPIC_API_KEY  (required — extraction + verdicts)
+#   TAVILY_API_KEY     (required for web-search evidence)
+#   ENTREZ_EMAIL       (required by NCBI for PubMed; NCBI_API_KEY optional)
 
-# 5. Run your first claim check
-python main.py --text "Green tea melts belly fat in two weeks."
+# 5. Run your first claim check — the full pipeline
+python main.py --text "Cumin water melts belly fat in two weeks."
 ```
 
-Or check a live article by URL:
+More ways to run it:
 
 ```bash
-python main.py --url "https://www.healthline.com/nutrition/green-tea-and-weight-loss"
+python main.py --url   "https://example.com/some-health-article"   # article by URL
+python main.py --image screenshot.png                              # screenshot (vision)
+python main.py --video "https://tiktok.com/@user/video/123"         # video link
+python main.py --text "..." --no-evidence                          # extract + decompose only
+python main.py --text "..." --json                                 # also emit the dossier as JSON
 ```
 
 ---
 
 ## Example Output
 
-**Input:**
-> "Green tea melts belly fat in two weeks."
+A real, end-to-end run (abridged for length — evidence lists trimmed):
 
-**Claim extraction (Week 1, live):**
-
-```
-Primary claim: Green tea melts belly fat in two weeks.
-
-Atomic facts (2):
-  [1] (causal)   Green tea melts belly fat.
-                 from: "Green tea melts belly fat in two weeks"
-  [2] (temporal) The effect occurs within two weeks.
-                 from: "Green tea melts belly fat in two weeks"
+```console
+$ python main.py --text "Cumin water melts belly fat in two weeks"
 ```
 
-One marketing sentence, two independently testable assertions — exactly what the decomposition stage exists to surface.
-
-**Coming next (Weeks 5–8):** each atom gets retrieved evidence, a source-tier badge, and a categorical verdict, assembled into a full Evidence Dossier:
-
 ```
-[1] Green tea melts belly fat            →  Partially Refuted
-    └ Tier 1: Cochrane review — modest, non-significant effect on body weight
-[2] The effect occurs within two weeks   →  Strongly Refuted
-    └ Tier 2: trials measuring effects run ≥6 weeks; 2-week effect is negligible
+==============================================================================
+CLAIMCHECK AI  —  EVIDENCE DOSSIER
+==============================================================================
+Dossier ID : bbeeb73b-0227-44b5-b3d5-dcdaa99e441c
+Generated  : 2026-07-23T20:35:26+00:00
+Source     : text
+------------------------------------------------------------------------------
+PRIMARY CLAIM
+  Cumin water melts belly fat in two weeks.
+
+RHETORICAL RED FLAGS (2)
+  [!] Guaranteed / absolute outcomes
+      "melts belly fat"
+      'melts' implies a dramatic, certain dissolution of fat that overstates
+      what the evidence shows (modest reductions over weeks to months).
+  [!] False urgency / compressed timeline
+      "in two weeks"
+      A specific two-week window is not supported by any clinical study and can
+      mislead consumers into expecting rapid results.
+------------------------------------------------------------------------------
+PER-CLAIM VERDICTS (2)
+------------------------------------------------------------------------------
+[1] (causal) Cumin water causes belly fat loss.
+    VERDICT: Partially Supported  +
+    Multiple T2 randomized controlled trials associate cumin (capsule/powder)
+    with modest reductions in body weight and waist circumference — but they
+    tested cumin powder/capsules, NOT "cumin water", and "melts" overstates a
+    modest effect. The single T4 source can't independently support the claim.
+    Evidence:
+      (+) [T2] Annals of nutrition & metabolism (2015)  rel=0.33
+          RCT: cumin cyminum L. vs orlistat vs placebo in 78 overweight adults…
+      (.) [T4] ijmrhs.com (n.d.)  rel=0.71
+          Narrative review; context only, not weighted as evidence.
+
+[2] (temporal) Cumin water produces belly fat loss within two weeks.
+    VERDICT: Partially Refuted  -
+    No credible T2 evidence supports a two-week timeframe. The RCTs ran 8 weeks
+    to 3 months — four times longer than claimed — and none tested a two-week
+    window. The claim's timeline is implicitly contradicted by the evidence.
+    Evidence:
+      (-) [T2] Annals of nutrition & metabolism (2015)  rel=0.33
+          8-week trial — shortest rigorous study, still 4x the claimed window.
+
+------------------------------------------------------------------------------
+NARRATIVE SUMMARY
+  The claim says cumin water will "melt" belly fat within two weeks. Trials do
+  suggest cumin (as powder/capsules) is linked to modest weight and waist
+  reductions — but "cumin water" specifically was never studied, the effect is
+  modest not dramatic, and no research supports a two-week timeframe (the
+  shortest rigorous trial ran eight weeks). The wording is also exaggerated:
+  "melts" and "in two weeks" promise a fast, guaranteed result the science
+  does not support.
+==============================================================================
 ```
+
+Notice the decomposition: one marketing sentence becomes **two independently
+testable, self-contained atoms** — the temporal atom carries its own subject
+("cumin water produces belly fat loss within two weeks"), never a bare "the
+effect", so each is retrieved and judged on its own. The causal atom lands at
+*Partially Supported*; the fabricated timeline at *Partially Refuted*. A single
+whole-claim verdict could never say both.
 
 ---
 
@@ -278,14 +336,16 @@ One marketing sentence, two independently testable assertions — exactly what t
 | Phase | Weeks | Status |
 |-------|-------|--------|
 | Claim extractor + text/URL input + LLM abstraction + test suite | 1–2 | ✅ **Done** |
-| Screenshot input (LLM vision) | 3 | ⬜ Next |
-| Video input (yt-dlp + Whisper) | 4 | ⬜ |
-| Evidence retrieval (PubMed + Qdrant + Tavily) | 5–6 | ⬜ |
-| Verdict engine + dossier builder + rhetorical flags | 7–8 | ⬜ |
-| Frontend (Next.js) + FastAPI wrapper | 9–10 | ⬜ |
+| Screenshot input (LLM vision) | 3 | ✅ **Done** |
+| Video input (yt-dlp + Whisper) | 4 | ✅ **Done** |
+| Evidence retrieval (PubMed + Tavily; Qdrant next iteration) | 5–6 | ✅ **Done** |
+| Verdict engine + dossier builder + rhetorical flags | 7–8 | ✅ **Done** |
+| Frontend (Next.js) + FastAPI wrapper | 9–10 | ⬜ Next |
 | Testing, edge cases, semantic caching | 11–12 | ⬜ |
 
-**What's built today:** input normalization (text + URL), claim extraction with classified atomic facts, the LLM-agnostic provider layer with two-tier routing and a soft token budget, strict Pydantic schemas with enforced invariants, and a 23-test offline suite.
+**What's built today — the full pipeline runs end to end:** input normalization across all four modalities (text, URL, screenshot, video), claim extraction into classified self-contained atomic facts, zero-LLM-token evidence retrieval from PubMed + web search with source-tier classification, the verdict engine (per-atom categorical verdicts, evidence-stance classification, and rhetorical red-flag detection in one batched premium call), and the dossier builder with a plain-language narrative summary. All wired through the LLM-agnostic provider layer with two-tier routing and a soft token budget, backed by strict Pydantic schemas with enforced invariants and a **111-test offline suite**.
+
+> **Note on Qdrant:** evidence retrieval currently runs on PubMed (Biopython) + Tavily with a lexical relevance proxy. The Qdrant vector-search corpus slots in behind the same 0–1 relevance interface in a later iteration — no downstream changes needed.
 
 ---
 
