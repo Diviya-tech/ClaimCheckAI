@@ -226,7 +226,7 @@ ClaimCheckAI/
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR-USERNAME/ClaimCheckAI.git
+git clone https://github.com/Diviya-tech/ClaimCheckAI.git
 cd ClaimCheckAI
 
 # 2. (Recommended) create a virtual environment
