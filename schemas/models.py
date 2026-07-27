@@ -178,7 +178,12 @@ class FactEvidence(BaseModel):
 
 
 class AtomicVerdict(BaseModel):
-    """A categorical verdict for one atomic fact, with the evidence behind it."""
+    """A categorical verdict for one atomic fact, with the evidence behind it.
+
+    Every piece of evidence gathered for the fact lands in exactly one of the
+    three buckets below, its `evidence_stance` set by the verdict engine, so the
+    dossier can cite each source alongside how it bore on the verdict.
+    """
 
     atomic_fact: AtomicFact = Field(..., description="The fact this verdict evaluates.")
     verdict: Verdict = Field(..., description="One of the seven categorical verdicts.")
@@ -190,9 +195,36 @@ class AtomicVerdict(BaseModel):
         default_factory=list,
         description="Evidence that refutes or contradicts the fact.",
     )
+    neutral_evidence: list[Evidence] = Field(
+        default_factory=list,
+        description="Evidence retrieved for the fact that neither supports nor "
+        "refutes it (background / context only).",
+    )
     reasoning: str = Field(
         ...,
         description="Transparent explanation of how the verdict follows from the evidence.",
+    )
+
+
+class RhetoricalFlag(BaseModel):
+    """A rhetorical / manipulation pattern detected in the original claim text.
+
+    Flags describe HOW a claim is argued, not whether it is true — a claim can be
+    both accurate and rhetorically manipulative, or false and soberly worded. They
+    are surfaced in the dossier as context, never folded into the evidence verdict.
+    """
+
+    pattern: str = Field(
+        ...,
+        description="Name of the pattern, e.g. 'Conspiracy framing' or 'Appeal to nature'.",
+    )
+    explanation: str = Field(
+        ...,
+        description="Why this pattern is a red flag in a health claim.",
+    )
+    excerpt: str = Field(
+        default="",
+        description="The phrase from the original claim that triggered the flag.",
     )
 
 
@@ -210,9 +242,9 @@ class Dossier(BaseModel):
         default_factory=list,
         description="Per-atom categorical verdicts.",
     )
-    rhetorical_flags: list[str] = Field(
+    rhetorical_flags: list[RhetoricalFlag] = Field(
         default_factory=list,
-        description="Detected rhetorical / manipulation patterns (additive module, later).",
+        description="Rhetorical / manipulation patterns detected in the original claim text.",
     )
     narrative_summary: str = Field(
         default="",

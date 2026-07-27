@@ -1,13 +1,16 @@
-"""ClaimCheck AI — pipeline orchestrator (Weeks 1-6 scope).
+"""ClaimCheck AI — pipeline orchestrator (Weeks 1-8 scope).
 
-The pipeline now does input normalization -> claim extraction -> evidence
-retrieval. Verdicts and dossier assembly arrive in later weeks; this script will
-be wrapped in FastAPI in weeks 9-10.
+The full pipeline now runs end to end: input normalization -> claim extraction
+-> evidence retrieval -> verdict evaluation -> dossier assembly, and prints the
+completed evidence dossier. This script gets wrapped in FastAPI in weeks 9-10.
 
 Usage:
     python main.py --text "Green tea melts belly fat in two weeks."
-    python main.py --url  "https://example.com/some-health-article"
-    python main.py --text "..." --no-evidence    # skip evidence retrieval
+    python main.py --url   "https://example.com/some-health-article"
+    python main.py --image shot.png
+    python main.py --video "https://tiktok.com/@x/video/123"
+    python main.py --text "..." --no-evidence   # extract + decompose only
+    python main.py --text "..." --json          # also emit the dossier as JSON
 """
 
 from __future__ import annotations
@@ -18,14 +21,15 @@ import sys
 from pydantic import ValidationError
 
 from config import providers
-from config.settings import SOURCE_TIER_LABELS, SourceTier
 from core.claim_extractor import extract_claims
+from core.dossier_builder import build_dossier, format_dossier
 from core.evidence_retriever import retrieve_evidence
+from core.verdict_engine import evaluate
 from input.image_input import ImageExtractionError, extract_from_image
 from input.text_input import clean_text
 from input.url_input import URLExtractionError, extract_from_url
 from input.video_input import VideoExtractionError, extract_from_video
-from schemas.models import ClaimExtractionResult, FactEvidence, SourceFormat
+from schemas.models import ClaimExtractionResult, SourceFormat
 
 
 def check_claim(
@@ -84,39 +88,6 @@ def _print_result(result: ClaimExtractionResult) -> None:
     print("=" * 70)
 
 
-def _tier_badge(tier: int) -> str:
-    """Render a source tier as a compact badge, e.g. ``[T1]``."""
-    return f"[T{tier}]"
-
-
-def _print_evidence(fact_evidence: list[FactEvidence]) -> None:
-    """Print retrieved evidence per atomic fact, grouped by source tier."""
-    print("\n" + "#" * 70)
-    print("EVIDENCE DOSSIER (retrieved — not yet evaluated)")
-    print("#" * 70)
-    for i, fe in enumerate(fact_evidence, start=1):
-        fact = fe.atomic_fact
-        print(f"\n[{i}] ({fact.fact_type.value}) {fact.text}")
-        if fe.retrieval_note:
-            print(f"    ! {fe.retrieval_note}")
-        if not fe.evidence:
-            print("    (no relevant evidence found — try a different phrasing or check API keys)")
-            continue
-        # Group by tier (1 -> 4) so the most authoritative sources come first.
-        by_tier: dict[int, list] = {}
-        for ev in fe.evidence:
-            by_tier.setdefault(ev.source_tier, []).append(ev)
-        for tier in sorted(by_tier):
-            label = SOURCE_TIER_LABELS.get(SourceTier(tier), "")
-            print(f"    {_tier_badge(tier)} {label}")
-            for ev in by_tier[tier]:
-                pub = ev.publication_date.date().isoformat() if ev.publication_date else "n.d."
-                print(f"        • {ev.source_name} ({pub})  rel={ev.relevance_score:.2f}")
-                print(f"          {ev.summary or ev.content[:200]}")
-                print(f"          {ev.source_url}")
-    print("#" * 70)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="ClaimCheck AI — extract and decompose health claims from text, a URL, a screenshot, or a video."
@@ -129,7 +100,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-evidence",
         action="store_true",
-        help="Skip evidence retrieval; only extract and decompose the claim.",
+        help="Skip evidence retrieval and evaluation; only extract and decompose the claim.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Also print the full dossier as JSON (handy for the future API).",
     )
     return parser
 
@@ -152,20 +128,20 @@ def _force_utf8_stdout() -> None:
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdout()
     args = _build_parser().parse_args(argv)
+
+    # --- Stages 1-2: normalize input + extract/decompose the claim. ---
     try:
         if args.video:
             # Video has two channels (spoken + on-screen); surface both, then
             # run claim extraction on the merged text.
-            extraction = extract_from_video(args.video)
+            video = extract_from_video(args.video)
             print("=" * 70)
             print("TRANSCRIPTION (spoken):")
-            print(extraction.transcription or "(none)")
+            print(video.transcription or "(none)")
             print("-" * 70)
             print("ON-SCREEN TEXT (visual):")
-            print(extraction.visual_text or "(none)")
-            result = extract_claims(
-                extraction.combined_text, source_format=SourceFormat.VIDEO
-            )
+            print(video.visual_text or "(none)")
+            result = extract_claims(video.combined_text, source_format=SourceFormat.VIDEO)
         else:
             result = check_claim(text=args.text, url=args.url, image=args.image)
     except ValidationError as exc:
@@ -178,18 +154,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Budget guardrail: {exc}", file=sys.stderr)
         return 2
 
-    _print_result(result)
+    # `--no-evidence` is the debug path: show the raw extraction and stop before
+    # spending any retrieval/evaluation effort.
+    if args.no_evidence:
+        _print_result(result)
+        return 0
 
-    # Stage 3: evidence retrieval. Only runs when there's a claim to investigate
-    # and the user didn't opt out. Retrieval is resilient — individual source
-    # failures degrade to empty evidence rather than aborting the run.
-    if not args.no_evidence and result.claim_found:
-        try:
+    # --- Stages 3-5: retrieve evidence, evaluate verdicts, build the dossier. ---
+    # A no-claim input skips retrieval/evaluation entirely but still yields a
+    # (trivial) dossier so the output shape is always consistent.
+    try:
+        if result.claim_found:
             fact_evidence = retrieve_evidence(result.atomic_facts)
-        except providers.BudgetWarning as exc:
-            print(f"Budget guardrail (evidence): {exc}", file=sys.stderr)
-            return 2
-        _print_evidence(fact_evidence)
+            evaluation = evaluate(result, fact_evidence)
+            verdicts = evaluation.verdicts
+            flags = evaluation.rhetorical_flags
+        else:
+            verdicts = []
+            flags = []
+
+        dossier = build_dossier(
+            original_input=result.original_text,
+            claim_extraction=result,
+            verdicts=verdicts,
+            source_format=result.source_format,
+            rhetorical_flags=flags,
+        )
+    except providers.BudgetWarning as exc:
+        print(f"Budget guardrail: {exc}", file=sys.stderr)
+        return 2
+
+    print("\n" + format_dossier(dossier))
+    if args.json:
+        print("\n" + dossier.model_dump_json(indent=2))
 
     return 0
 
