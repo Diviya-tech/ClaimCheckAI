@@ -23,5 +23,11 @@ tavily-python>=0.3.0       # Supplementary web search
 pydantic>=2.5.0            # Schemas: Claim, AtomicFact, Evidence, Verdict, Dossier
 python-dotenv>=1.0.0       # Load API keys from .env
 
+# --- HTTP API (weeks 9-10) ---
+fastapi>=0.110.0           # HTTP interface over the pipeline (api/server.py)
+uvicorn[standard]>=0.29.0  # ASGI server: uvicorn api.server:app --reload
+python-multipart>=0.0.9    # Multipart/form-data parsing (file uploads)
+
 # --- Testing ---
 pytest>=8.0.0
+httpx>=0.27.0             # Required by FastAPI's TestClient (offline API tests)

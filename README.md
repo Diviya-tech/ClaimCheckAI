@@ -4,9 +4,9 @@
 
 **An evidence-evaluation engine for health claims — it decomposes what you see on social media into atomic facts and weighs each one against trusted medical literature.**
 
-![Status](https://img.shields.io/badge/status-full%20pipeline%20live%20(wk%201--8)-brightgreen)
+![Status](https://img.shields.io/badge/status-API%20%2B%20web%20UI%20live%20(wk%201--10)-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-111%20passing-success)
+![Tests](https://img.shields.io/badge/tests-123%20passing-success)
 ![LLM](https://img.shields.io/badge/LLM-agnostic-8A2BE2)
 ![Approach](https://img.shields.io/badge/verdicts-categorical%2C%20not%20scores-orange)
 
@@ -173,8 +173,9 @@ Each tool was chosen for a *project-specific* reason, not popularity:
 | **yt-dlp + Whisper** | Misinformation is video-native; this pair turns a TikTok/YouTube link into a transcript. |
 | **Tavily** | Purpose-built search API for LLM pipelines — supplementary evidence when the corpus is thin. |
 | **Tavily / free APIs over paid search** | Evidence retrieval must stay token- and dollar-cheap to scale to consumers. |
-| **pytest** | A claim-checker is only as trustworthy as its test suite; 111 offline tests run with no API key. |
-| **Next.js + Tailwind** (later) | The dossier is visual — tier badges, verdict tables — and deserves a real UI. |
+| **pytest** | A claim-checker is only as trustworthy as its test suite; 123 offline tests run with no API key. |
+| **FastAPI + uvicorn** | Typed, async HTTP layer that wraps the pipeline with zero logic duplication; Pydantic models become the API schema for free. |
+| **Next.js + Tailwind** | The dossier is visual — tier badges, verdict tables, clickable sources — so it gets a real, minimal UI (Google Scholar meets Perplexity). |
 
 ---
 
@@ -186,6 +187,16 @@ ClaimCheckAI/
 ├── CLAUDE.md                  # Project spec & working context
 ├── requirements.txt           # Dependencies, grouped by pipeline stage
 ├── main.py                     # Pipeline orchestrator + CLI
+├── start_server.py             # (wk 9-10) API launcher (= uvicorn api.server:app)
+│
+├── api/
+│   └── server.py               # (wk 9-10) FastAPI HTTP interface over the pipeline
+│
+├── frontend/                   # (wk 9-10) Next.js + Tailwind web UI
+│   └── app/
+│       ├── page.tsx            #   input page (text / URL / screenshot)
+│       ├── components/DossierView.tsx   # renders the evidence dossier
+│       └── lib/{types,api}.ts  #   API types + fetch client
 │
 ├── config/
 │   ├── settings.py             # API keys, source tiers, two-tier model config, token budget
@@ -211,8 +222,9 @@ ClaimCheckAI/
 ├── tests/
 │   ├── test_claims.py          # extraction, input handlers, provider layer
 │   ├── test_evidence.py        # (wk 5-6) retrieval, ranking, source tiers
-│   └── test_verdicts.py        # (wk 7-8) verdict logic, flags, dossier assembly
-│                               #   → 111 offline tests total (LLM layer stubbed)
+│   ├── test_verdicts.py        # (wk 7-8) verdict logic, flags, dossier assembly
+│   └── test_api.py             # (wk 9-10) FastAPI endpoints, status codes
+│                               #   → 123 offline tests total (LLM layer stubbed)
 ├── data/test_inputs/           # Fixtures for end-to-end testing
 └── docs/
     ├── ARCHITECTURE.md         # Deep technical design
@@ -255,6 +267,40 @@ python main.py --video "https://tiktok.com/@user/video/123"         # video link
 python main.py --text "..." --no-evidence                          # extract + decompose only
 python main.py --text "..." --json                                 # also emit the dossier as JSON
 ```
+
+### Run the web app (API + frontend)
+
+The CLI above is one interface; the same pipeline is also exposed as an HTTP API
+with a clean web UI. **Use two terminals.**
+
+**Terminal 1 — FastAPI backend** (serves on `http://localhost:8000`, docs at `/docs`):
+
+```bash
+pip install -r requirements.txt          # includes fastapi + uvicorn
+uvicorn api.server:app --reload          # or: python start_server.py
+```
+
+**Terminal 2 — Next.js frontend** (serves on `http://localhost:3000`):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open **http://localhost:3000**, paste a claim (or a URL / screenshot), and read
+the dossier. The frontend calls the backend at `http://localhost:8000` by default;
+override with `NEXT_PUBLIC_API_BASE` if you host the API elsewhere.
+
+**API endpoints:**
+
+| Method & path | Body (one of) | Returns |
+|---------------|---------------|---------|
+| `GET /api/health` | — | `{"status": "ok"}` |
+| `POST /api/extract` | `text` · `url` · `image` (base64) · `video_url` | `ClaimExtractionResult` (fast path — extraction only) |
+| `POST /api/check` | same | full `Dossier` (extraction → evidence → verdicts → narrative) |
+
+Status codes: `400` bad input · `422` no evaluable health claim · `503` token budget exhausted · `500` pipeline error.
 
 ---
 
@@ -340,10 +386,10 @@ whole-claim verdict could never say both.
 | Video input (yt-dlp + Whisper) | 4 | ✅ **Done** |
 | Evidence retrieval (PubMed + Tavily; Qdrant next iteration) | 5–6 | ✅ **Done** |
 | Verdict engine + dossier builder + rhetorical flags | 7–8 | ✅ **Done** |
-| Frontend (Next.js) + FastAPI wrapper | 9–10 | ⬜ Next |
-| Testing, edge cases, semantic caching | 11–12 | ⬜ |
+| FastAPI backend + Next.js frontend | 9–10 | ✅ **Done** |
+| Testing, edge cases, semantic caching | 11–12 | ⬜ Next |
 
-**What's built today — the full pipeline runs end to end:** input normalization across all four modalities (text, URL, screenshot, video), claim extraction into classified self-contained atomic facts, zero-LLM-token evidence retrieval from PubMed + web search with source-tier classification, the verdict engine (per-atom categorical verdicts, evidence-stance classification, and rhetorical red-flag detection in one batched premium call), and the dossier builder with a plain-language narrative summary. All wired through the LLM-agnostic provider layer with two-tier routing and a soft token budget, backed by strict Pydantic schemas with enforced invariants and a **111-test offline suite**.
+**What's built today — the full pipeline runs end to end, via CLI *and* a web app:** input normalization across all four modalities (text, URL, screenshot, video), claim extraction into classified self-contained atomic facts, zero-LLM-token evidence retrieval from PubMed + web search with source-tier classification, the verdict engine (per-atom categorical verdicts, evidence-stance classification, and rhetorical red-flag detection in one batched premium call), and the dossier builder with a plain-language narrative summary. This same pipeline is exposed as a **FastAPI backend** and driven by a clean **Next.js + Tailwind frontend**. All wired through the LLM-agnostic provider layer with two-tier routing and a soft token budget, backed by strict Pydantic schemas with enforced invariants and a **123-test offline suite**.
 
 > **Note on Qdrant:** evidence retrieval currently runs on PubMed (Biopython) + Tavily with a lexical relevance proxy. The Qdrant vector-search corpus slots in behind the same 0–1 relevance interface in a later iteration — no downstream changes needed.
 
