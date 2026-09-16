@@ -18,6 +18,13 @@ For each atomic fact the engine:
   c. assigns one of the seven categorical verdicts, and
   d. writes a plain reasoning string that cites specific evidence.
 
+A verdict is a statement about the EVIDENCE, not about the world, so the prompt
+draws a hard line between evidence that contradicts a fact and evidence that is
+merely silent on it. If nothing retrieved actually tested the parameter claimed
+(the timeframe, the dose, the preparation), the verdict is Insufficient Evidence
+— "no study looked" is not "the study found nothing". Only evidence that is
+incompatible with a fact can refute it.
+
 Separately (same call) it inspects the ORIGINAL claim text for rhetorical red
 flags — guaranteed outcomes, conspiracy framing, appeal to nature, anecdote-as-
 proof, false urgency, emotional manipulation. Flags describe how the claim is
@@ -103,18 +110,47 @@ For EACH atomic fact, do all of the following:
      little or no credible opposition.
    - "Partially Supported": real support, but qualified — limited, lower-tier,
      narrow conditions, or only part of the fact holds.
-   - "Insufficient Evidence": too little relevant evidence to judge (thin, absent,
-     or only tangential results). Use this when evidence is "none found" or noise.
+   - "Insufficient Evidence": not enough quality evidence was found to evaluate
+     this specific fact in EITHER direction. Use this when:
+       * no retrieved study addresses the specific parameters of the fact — its
+         timeframe, dosage, preparation/form, population, or magnitude;
+       * the retrieved studies tested related but DIFFERENT conditions;
+       * retrieval returned very few relevant results, or none at all.
    - "Conflicting Evidence": credible evidence of comparable weight on BOTH sides.
-   - "Partially Refuted": evidence mostly contradicts it, with some nuance or
-     narrow support remaining.
-   - "Strongly Refuted": strong, consistent higher-tier evidence contradicts it.
+   - "Partially Refuted": evidence leans against the fact but with caveats — it
+     does not directly disprove it. Example: studies found the effect only at a
+     much longer timeframe or a much higher dose, which makes the claimed
+     timeframe or dose implausible without ever testing it directly.
+   - "Strongly Refuted": ONLY when the evidence DIRECTLY CONTRADICTS the fact — a
+     study measured the specific thing claimed and found it false, or a systematic
+     review explicitly concludes the claimed effect does not exist. The evidence
+     must be INCOMPATIBLE with the fact, not merely silent on it.
    - "Too Vague to Evaluate": the fact itself is too vague, subjective, or
      unfalsifiable to test against evidence, regardless of what was retrieved.
 
+CRITICAL: Distinguish between evidence that directly contradicts a claim and
+evidence that simply does not address it. If no retrieved study specifically
+tested the exact parameter claimed (e.g. the specific timeframe, dosage form, or
+magnitude), the verdict for that parameter should be "Insufficient Evidence", not
+a Refuted verdict. A claim can only be "Strongly Refuted" when evidence is
+directly incompatible with it — not when evidence is merely absent.
+
+Before assigning ANY Refuted verdict, ask yourself: does the evidence say this is
+WRONG, or does it merely say we don't have proof it's RIGHT? If the latter, use
+"Insufficient Evidence".
+
+Absence of evidence is not evidence of absence. "No study tested a two-week
+timeframe" means the two-week claim is UNTESTED (Insufficient Evidence). Only "a
+study measured the two-week mark and found no effect" makes it refuted. The same
+applies to stance: a study that never measured what the fact claims is "neutral",
+not "opposing" — mark an item "opposing" only if its own findings are
+incompatible with the fact.
+
 5. REASONING: 2-4 sentences in plain language explaining how the verdict follows
    from the evidence. Reference specific items by their source and tier (e.g.
-   "a 2019 Cochrane review (T1) found no effect"). Be honest about limitations.
+   "a 2019 Cochrane review (T1) found no effect"). Be honest about limitations —
+   and when the verdict is "Insufficient Evidence", say plainly WHAT was never
+   tested rather than implying the claim was disproven.
 
 SEPARATELY, analyze the ORIGINAL claim text for rhetorical red flags — the WAY it
 is argued, independent of whether it is true. Only report patterns actually
