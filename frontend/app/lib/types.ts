@@ -25,6 +25,9 @@ export interface Evidence {
   source_url: string;
   source_name: string;
   source_tier: number; // 1..4
+  // Plain-language name for source_tier, computed server-side (e.g.
+  // "Peer-reviewed Study"). The UI renders this rather than re-mapping numbers.
+  human_readable_tier: string;
   relevance_score: number; // 0..1
   evidence_stance: EvidenceStance;
   publication_date: string | null;

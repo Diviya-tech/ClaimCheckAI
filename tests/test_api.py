@@ -158,6 +158,18 @@ def test_check_full_dossier(stub_pipeline):
     assert body["narrative_summary"]
 
 
+def test_evidence_carries_human_readable_tier(stub_pipeline):
+    """The tier's plain-language name ships alongside the number.
+
+    It's a computed field, so a `response_model` that filtered computed fields
+    would silently drop it and leave the UI with nothing to render.
+    """
+    resp = client.post("/api/check", json={"text": "Cumin water melts belly fat."})
+    evidence = resp.json()["verdicts"][0]["opposing_evidence"][0]
+    assert evidence["source_tier"] == 2
+    assert evidence["human_readable_tier"] == "Peer-reviewed Study"
+
+
 def test_check_no_claim_is_422(monkeypatch):
     monkeypatch.setattr(server, "check_claim", lambda **_kw: _extraction(False))
     resp = client.post("/api/check", json={"text": "I like tea."})

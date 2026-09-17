@@ -17,7 +17,9 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
+
+from config.settings import SOURCE_TIER_SHORT_LABELS
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +153,22 @@ class Evidence(BaseModel):
         default=None,
         description="When the source was published, if known.",
     )
+
+    @computed_field(
+        description=(
+            "Plain-language name for `source_tier` (e.g. 'Peer-reviewed Study'), "
+            "so clients can render the tier without re-implementing the mapping."
+        )
+    )
+    @property
+    def human_readable_tier(self) -> str:
+        """The tier's badge label, derived from `source_tier`.
+
+        Computed rather than stored so it can never disagree with the number it
+        describes, and so it appears in every serialization (API responses and
+        the CLI's `--json` dump) without any caller opting in.
+        """
+        return SOURCE_TIER_SHORT_LABELS.get(self.source_tier, "General Web Source")
 
 
 class FactEvidence(BaseModel):

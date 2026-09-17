@@ -28,7 +28,7 @@ const VERDICT_ACCENT: Record<Verdict, string> = {
   "Too Vague to Evaluate": "border-l-gray-400",
 };
 
-// --- Source tier badges: T1 dark blue -> T4 gray ---
+// --- Source tier badges: tier 1 dark blue -> tier 4 gray ---
 const TIER_BADGE: Record<number, string> = {
   1: "bg-blue-900 text-white",
   2: "bg-blue-600 text-white",
@@ -36,12 +36,47 @@ const TIER_BADGE: Record<number, string> = {
   4: "bg-gray-300 text-gray-800",
 };
 
-const TIER_LABEL: Record<number, string> = {
+// Tooltip text. The badge itself carries the API's `human_readable_tier`; this
+// is the longer "why does this rank here" line for anyone who hovers.
+const TIER_TITLE: Record<number, string> = {
   1: "Systematic reviews & official guidelines (Cochrane, WHO, CDC, meta-analyses)",
   2: "Peer-reviewed studies & major medical institutions (PubMed, NIH, Mayo)",
   3: "Credentialed health journalism & university health centers",
   4: "General web / social media — context only, not evidence",
 };
+
+// Fallback label, only used if an older API build omits `human_readable_tier`.
+const TIER_FALLBACK_LABEL: Record<number, string> = {
+  1: "Systematic Review / Meta-analysis",
+  2: "Peer-reviewed Study",
+  3: "Medical Journalism",
+  4: "General Web Source",
+};
+
+// Plain-language explanation of the tier hierarchy, shown in the collapsed
+// "Why is this considered high-quality evidence?" section below the verdicts.
+const TIER_EXPLAINER: { name: string; tier: number; text: string }[] = [
+  {
+    name: "Systematic Reviews and Meta-analyses",
+    tier: 1,
+    text: "(highest) These analyze multiple studies together. One systematic review represents the combined findings of many individual studies.",
+  },
+  {
+    name: "Peer-reviewed Studies",
+    tier: 2,
+    text: "Individual studies published in medical journals and reviewed by other scientists before publication.",
+  },
+  {
+    name: "Medical Journalism",
+    tier: 3,
+    text: "Reporting by credentialed health journalists or university health centers. Useful for context but not primary evidence.",
+  },
+  {
+    name: "General Web Sources",
+    tier: 4,
+    text: "Blogs, social media, and unverified web content. Shown for context only — not weighted as evidence.",
+  },
+];
 
 const STANCE_STYLE: Record<string, { label: string; className: string }> = {
   supporting: { label: "Supports", className: "text-green-700 bg-green-50" },
@@ -49,15 +84,44 @@ const STANCE_STYLE: Record<string, { label: string; className: string }> = {
   neutral: { label: "Context", className: "text-gray-600 bg-gray-100" },
 };
 
-function TierBadge({ tier }: { tier: number }) {
+function TierBadge({ tier, label }: { tier: number; label?: string }) {
   const cls = TIER_BADGE[tier] ?? TIER_BADGE[4];
   return (
     <span
-      title={TIER_LABEL[tier] ?? ""}
-      className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ${cls}`}
+      title={TIER_TITLE[tier] ?? ""}
+      className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-semibold ${cls}`}
     >
-      T{tier}
+      {label || TIER_FALLBACK_LABEL[tier] || TIER_FALLBACK_LABEL[4]}
     </span>
+  );
+}
+
+/* Collapsed by default: the tier names are self-explanatory at a glance, and
+   this is here for the reader who wants to know why one badge outranks another.
+   Native <details> keeps it keyboard-accessible with no client-side state. */
+function EvidenceQualityNote() {
+  return (
+    <details className="group rounded-lg border border-border bg-surface px-4 py-3">
+      <summary className="cursor-pointer list-none text-sm font-medium text-blue-800 hover:underline [&::-webkit-details-marker]:hidden">
+        <span aria-hidden className="mr-1.5 inline-block transition-transform group-open:rotate-90">
+          ›
+        </span>
+        Why is this considered high-quality evidence?
+      </summary>
+      <div className="mt-3 border-t border-border pt-3">
+        <p className="text-sm text-gray-700">
+          ClaimCheck rates evidence quality on four tiers:
+        </p>
+        <ul className="mt-2 space-y-2">
+          {TIER_EXPLAINER.map((t) => (
+            <li key={t.tier} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+              <TierBadge tier={t.tier} label={t.name} />
+              <span className="flex-1 leading-relaxed text-gray-700">{t.text}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </details>
   );
 }
 
@@ -72,7 +136,7 @@ function EvidenceRow({ ev }: { ev: Evidence }) {
   return (
     <li className="rounded-md border border-border bg-surface p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <TierBadge tier={ev.source_tier} />
+        <TierBadge tier={ev.source_tier} label={ev.human_readable_tier} />
         <span
           className={`rounded px-1.5 py-0.5 text-xs font-medium ${stance.className}`}
         >
@@ -207,6 +271,9 @@ export default function DossierView({ dossier }: { dossier: Dossier }) {
         {dossier.verdicts.map((v, i) => (
           <VerdictCard key={i} verdict={v} index={i} />
         ))}
+        {/* One explainer for every evidence list above, rather than repeating
+            the same four tiers under each verdict card. */}
+        <EvidenceQualityNote />
       </div>
 
       {/* Narrative summary */}

@@ -53,6 +53,17 @@ SOURCE_TIER_LABELS: dict[SourceTier, str] = {
     SourceTier.TIER_4: "General web, blogs & social media (context only, not evidence)",
 }
 
+# Short names for the same tiers, sized to fit on a badge. "T1".."T4" means
+# nothing to a reader who hasn't memorized the scale, so this is what the UI
+# shows; SOURCE_TIER_LABELS above stays the longer explanatory form. Serialized
+# on every Evidence as `human_readable_tier`, so clients never re-map numbers.
+SOURCE_TIER_SHORT_LABELS: dict[SourceTier, str] = {
+    SourceTier.TIER_1: "Systematic Review / Meta-analysis",
+    SourceTier.TIER_2: "Peer-reviewed Study",
+    SourceTier.TIER_3: "Medical Journalism",
+    SourceTier.TIER_4: "General Web Source",
+}
+
 
 # --------------------------------------------------------------------------- #
 # Source domain -> tier mapping (used by core/source_classifier.py)

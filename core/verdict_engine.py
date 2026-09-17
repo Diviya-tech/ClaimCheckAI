@@ -128,29 +128,66 @@ For EACH atomic fact, do all of the following:
    - "Too Vague to Evaluate": the fact itself is too vague, subjective, or
      unfalsifiable to test against evidence, regardless of what was retrieved.
 
-CRITICAL: Distinguish between evidence that directly contradicts a claim and
-evidence that simply does not address it. If no retrieved study specifically
-tested the exact parameter claimed (e.g. the specific timeframe, dosage form, or
-magnitude), the verdict for that parameter should be "Insufficient Evidence", not
-a Refuted verdict. A claim can only be "Strongly Refuted" when evidence is
-directly incompatible with it — not when evidence is merely absent.
-
-Before assigning ANY Refuted verdict, ask yourself: does the evidence say this is
-WRONG, or does it merely say we don't have proof it's RIGHT? If the latter, use
-"Insufficient Evidence".
-
-Absence of evidence is not evidence of absence. "No study tested a two-week
-timeframe" means the two-week claim is UNTESTED (Insufficient Evidence). Only "a
-study measured the two-week mark and found no effect" makes it refuted. The same
-applies to stance: a study that never measured what the fact claims is "neutral",
-not "opposing" — mark an item "opposing" only if its own findings are
-incompatible with the fact.
-
 5. REASONING: 2-4 sentences in plain language explaining how the verdict follows
    from the evidence. Reference specific items by their source and tier (e.g.
    "a 2019 Cochrane review (T1) found no effect"). Be honest about limitations —
    and when the verdict is "Insufficient Evidence", say plainly WHAT was never
    tested rather than implying the claim was disproven.
+
+SIX SCIENTIFIC REASONING RULES
+Apply these six reasoning rules when evaluating evidence. If any of these
+distinctions are relevant to the current claim, mention them in your reasoning.
+They are the difference between reporting what a study SHOWS and over-reading it.
+
+Make the point, never the citation: these rules are internal guidance, so the
+reasoning must NOT refer to them by number or name ("Rule 6", "per reasoning rule
+2"). The reader never sees this list. Write the distinction itself in plain words
+— "the trials used 3 g of cumin powder, not cumin water, which is far more
+dilute" rather than "Rule 6 applies".
+
+1. "No evidence found" is NOT "Refuted". Absence of evidence is not evidence of
+   absence. If no study addressed the specific claim, the verdict is
+   "Insufficient Evidence", not a Refuted verdict.
+   CRITICAL: distinguish evidence that directly contradicts a claim from evidence
+   that simply does not address it. If no retrieved study specifically tested the
+   exact parameter claimed (the timeframe, dosage form, or magnitude), the verdict
+   for that parameter is "Insufficient Evidence". A claim can only be "Strongly
+   Refuted" when evidence is directly INCOMPATIBLE with it — not when evidence is
+   merely absent. Before assigning ANY Refuted verdict, ask yourself: does the
+   evidence say this is WRONG, or does it merely say we don't have proof it's
+   RIGHT? If the latter, use "Insufficient Evidence". The same rule governs
+   stance: an item that never measured what the fact claims is "neutral", not
+   "opposing".
+
+2. "The study lasted 12 weeks" is NOT "12 weeks are required". A study's duration
+   is a DESIGN CHOICE, not a finding. If the shortest trial ran 8 weeks, that
+   means nobody tested shorter — it does NOT mean shorter timeframes don't work.
+   Never convert a trial's length, dose, or population into a claimed threshold
+   the study never tested.
+
+3. "Statistically significant" is NOT "clinically meaningful". A p-value below
+   0.05 means the result is unlikely to be due to chance. It does NOT mean the
+   effect is large enough to matter in practice. A statistically significant
+   0.5 kg weight loss over 12 weeks is real but practically meaningless to someone
+   expecting to "melt belly fat". When a significant effect is too small to matter
+   for what the claim promises, say so and let it qualify the verdict.
+
+4. "Association" is NOT "causation". Observational studies showing correlation
+   (people who drink green tea weigh less) do NOT prove the tea caused the weight
+   loss — the association may run the other way or come from a third factor. Only
+   randomized controlled trials can establish causation. Flag explicitly whether
+   the evidence is associational or causal, especially when judging a causal fact.
+
+5. "Works in population X" is NOT "works for everyone". A study on postmenopausal
+   women in Iran does not automatically apply to young men in Texas. Note when
+   evidence comes from a specific population (age, sex, health status, region)
+   that may not generalize to whoever the claim is aimed at.
+
+6. "Ingredient/extract X" is NOT "an ordinary food or drink containing X". A study
+   using 500 mg of concentrated cumin extract in capsules does NOT show that cumin
+   water — which contains a fraction of that dose — has the same effect. Flag when
+   the studied FORM (extract, capsule, concentration, dose, route) differs from
+   the form the claim describes, and let that gap qualify the verdict.
 
 SEPARATELY, analyze the ORIGINAL claim text for rhetorical red flags — the WAY it
 is argued, independent of whether it is true. Only report patterns actually
