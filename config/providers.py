@@ -40,6 +40,35 @@ class BudgetWarning(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Malformed structured output
+# --------------------------------------------------------------------------- #
+class MalformedOutputError(Exception):
+    """Raised when a structured call comes back in a shape we can't use.
+
+    Structured output is forced via tool_use, so this should be rare — but "rare"
+    is not "never": a model can return prose instead of the tool call, or a tool
+    call missing a required key. `llm_call` retries once before surfacing this,
+    and the message is written to be shown to a user, not just logged.
+
+    Carries the token counts of the failed attempt when they are known, so the
+    usage ledger still records what the attempt actually cost.
+    """
+
+    def __init__(
+        self, message: str, input_tokens: int = 0, output_tokens: int = 0
+    ) -> None:
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+# How many extra attempts a malformed structured response gets. One retry: a
+# second try clears a transient formatting slip, and a third would just burn
+# tokens confirming the model can't satisfy the schema right now.
+STRUCTURED_RETRIES = 1
+
+
+# --------------------------------------------------------------------------- #
 # Daily usage tracking (persisted to a small JSON file)
 # --------------------------------------------------------------------------- #
 def _usage_path() -> Path:
@@ -197,8 +226,13 @@ class AnthropicProvider(LLMProvider):
         for block in response.content:
             if block.type == "tool_use" and block.name == self._STRUCTURED_TOOL:
                 return block.input
-        raise RuntimeError(
-            "Expected a tool_use block for structured output but none was returned."
+        # The model answered without calling the forced tool. Report it as
+        # malformed (so `llm_call` can retry) and carry the tokens we just spent
+        # so the failed attempt is still billed to the daily ledger.
+        raise MalformedOutputError(
+            "The model returned no structured result (no tool_use block).",
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
         )
 
 
@@ -253,6 +287,8 @@ def llm_call(
         BudgetWarning: if today's usage already meets/exceeds DAILY_TOKEN_BUDGET
             and `allow_over_budget` is False. Catch and retry with
             allow_over_budget=True to continue.
+        MalformedOutputError: if a structured call came back unusable twice in a
+            row (one automatic retry). The message is user-readable.
         ValueError: if `model_tier` or the configured provider is unknown.
     """
     if model_tier not in settings.MODEL_CONFIG:
@@ -278,33 +314,84 @@ def llm_call(
     tier_cfg = settings.MODEL_CONFIG[model_tier]
     provider = _get_provider(str(tier_cfg["provider"]))
 
-    content, input_tokens, output_tokens = provider.complete(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        model=str(tier_cfg["model"]),
-        max_tokens=int(tier_cfg["max_tokens"]),
-        response_schema=response_schema,
-        images=images,
-    )
+    # Structured calls get one retry on a malformed response; free-text calls
+    # have nothing to malform, so they run exactly once.
+    attempts = STRUCTURED_RETRIES + 1 if response_schema is not None else 1
+    last_error: MalformedOutputError | None = None
 
-    new_total = _record_usage(input_tokens, output_tokens)
-    logger.debug(
-        "%s/%s call: +%d in / +%d out tokens (daily total %d/%d).",
-        tier_cfg["provider"],
-        tier_cfg["model"],
-        input_tokens,
-        output_tokens,
-        new_total,
-        settings.DAILY_TOKEN_BUDGET,
-    )
+    for attempt in range(1, attempts + 1):
+        try:
+            content, input_tokens, output_tokens = provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=str(tier_cfg["model"]),
+                max_tokens=int(tier_cfg["max_tokens"]),
+                response_schema=response_schema,
+                images=images,
+            )
+        except MalformedOutputError as exc:
+            # The attempt still consumed tokens; record them before retrying.
+            _record_usage(exc.input_tokens, exc.output_tokens)
+            last_error = exc
+            logger.warning(
+                "Malformed structured response on attempt %d/%d: %s",
+                attempt, attempts, exc,
+            )
+            continue
 
-    # Warn (but don't raise) if THIS call pushed us over the line — the result
-    # is already paid for, so we hand it back and let the next call enforce.
-    if new_total >= settings.DAILY_TOKEN_BUDGET:
-        logger.warning(
-            "Daily token budget exceeded after this call: %d / %d.",
+        new_total = _record_usage(input_tokens, output_tokens)
+        logger.debug(
+            "%s/%s call: +%d in / +%d out tokens (daily total %d/%d).",
+            tier_cfg["provider"],
+            tier_cfg["model"],
+            input_tokens,
+            output_tokens,
             new_total,
             settings.DAILY_TOKEN_BUDGET,
         )
 
-    return content
+        # Warn (but don't raise) if THIS call pushed us over the line — the result
+        # is already paid for, so we hand it back and let the next call enforce.
+        if new_total >= settings.DAILY_TOKEN_BUDGET:
+            logger.warning(
+                "Daily token budget exceeded after this call: %d / %d.",
+                new_total,
+                settings.DAILY_TOKEN_BUDGET,
+            )
+
+        if response_schema is not None:
+            try:
+                _check_structured(content, response_schema)
+            except MalformedOutputError as exc:
+                last_error = exc
+                logger.warning(
+                    "Malformed structured response on attempt %d/%d: %s",
+                    attempt, attempts, exc,
+                )
+                continue
+
+        return content
+
+    raise MalformedOutputError(
+        f"The {model_tier} model returned an unusable response {attempts} times in "
+        f"a row ({last_error}). This is usually transient — please try again."
+    ) from last_error
+
+
+def _check_structured(content: Any, response_schema: dict[str, Any]) -> None:
+    """Verify a structured result is a dict carrying the schema's required keys.
+
+    tool_use makes this nearly always true, so the check is deliberately shallow:
+    it catches the failure modes that actually reach us (prose instead of a tool
+    call, a tool call missing a top-level key) without reimplementing a JSON
+    Schema validator. Anything deeper is caught by Pydantic downstream.
+    """
+    if not isinstance(content, dict):
+        raise MalformedOutputError(
+            f"expected a structured object, got {type(content).__name__}"
+        )
+    missing = [key for key in response_schema.get("required", []) if key not in content]
+    if missing:
+        raise MalformedOutputError(
+            f"structured result is missing required field(s): {', '.join(missing)}"
+        )

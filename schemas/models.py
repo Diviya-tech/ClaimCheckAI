@@ -193,6 +193,16 @@ class FactEvidence(BaseModel):
             "doesn't mistake a thin, noisy result set for real evidence."
         ),
     )
+    source_notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "User-readable notes about DEGRADED retrieval for this fact — a source "
+            "that was down, skipped, or unconfigured (e.g. 'PubMed was unavailable; "
+            "evidence came from web sources only'). Distinct from `retrieval_note`, "
+            "which describes the *quantity* of evidence found. These bubble up to "
+            "`Dossier.limitations` so the reader knows what the verdict is missing."
+        ),
+    )
 
 
 class AtomicVerdict(BaseModel):
@@ -267,4 +277,14 @@ class Dossier(BaseModel):
     narrative_summary: str = Field(
         default="",
         description="Plain-language summary tying the per-atom verdicts together.",
+    )
+    limitations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Plain-language notes about anything that degraded THIS run — a source "
+            "that was unavailable, a search that was skipped, a reasoning step the "
+            "token budget cut short. A dossier is always produced with whatever "
+            "could be completed; these say what it is missing so the reader can "
+            "weigh the verdicts accordingly."
+        ),
     )
