@@ -79,6 +79,53 @@ class TestSourceClassifier:
     @pytest.mark.parametrize(
         "url",
         [
+            "https://med.stanford.edu/health/heart-disease.html",
+            "https://www.health.harvard.edu/blog/vitamin-d-2024",
+            "https://uhs.berkeley.edu/sites/default/files/wellness/nutrition.pdf",
+            "https://medicine.yale.edu/news-article/x?page=2&lang=en",
+        ],
+    )
+    def test_legitimate_edu_pages_stay_tier_3(self, url):
+        from core.source_classifier import classify_source
+
+        assert classify_source(url).tier == 3
+
+    @pytest.mark.parametrize(
+        "url, signal",
+        [
+            # Injected external URLs (raw, encoded, bare www/TLD tokens).
+            ("https://people.uni.edu/~old/https://buy-pills.example.com/cheap", "injected"),
+            ("https://cs.uni.edu/wiki/x?u=https%3A%2F%2Fspam.ru%2F", "injected"),
+            ("https://uni.edu/files/www.casino-bonus.xyz", "injected"),
+            ("https://uni.edu/upload/best-deals.shop/", "injected"),
+            # Marketing / affiliate parameters.
+            ("https://uni.edu/health/x?utm_source=spam&utm_medium=seo", "marketing"),
+            ("https://uni.edu/health/x?affiliate=9921", "marketing"),
+            ("https://uni.edu/health/x?promo=SAVE50", "marketing"),
+            # Redirects (parameter or path segment).
+            ("https://uni.edu/login?redirect=evil", "redirect"),
+            ("https://uni.edu/lib/proxy?url=elsewhere", "redirect"),
+            ("https://uni.edu/click/track/123", "redirect"),
+            ("https://uni.edu/go/abc123", "redirect"),
+        ],
+    )
+    def test_spam_on_edu_domain_demoted_to_tier_4(self, url, signal):
+        from core.source_classifier import classify_source
+
+        result = classify_source(url)
+        assert result.tier == 4
+        assert signal in result.justification
+        assert "spam" in result.justification
+
+    def test_edu_spam_check_ignores_host(self):
+        from core.source_classifier import classify_source
+
+        # A subdomain that merely *looks* like a TLD token must not trip the check.
+        assert classify_source("https://pharmacy.online.uni.edu/about").tier == 3
+
+    @pytest.mark.parametrize(
+        "url",
+        [
             "https://www.frontiersin.org/journals/nutrition/articles/10.3389/x",
             "https://www.sciencedirect.com/science/article/pii/x",
             "https://link.springer.com/article/10.1007/x",          # springer subdomain

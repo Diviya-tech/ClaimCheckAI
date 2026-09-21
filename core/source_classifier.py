@@ -16,8 +16,9 @@ human-readable justification for the dossier's transparency.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from config.settings import (
     TIER_1_DOMAINS,
@@ -32,6 +33,33 @@ _TIER_1_PUB_TYPES = {"meta-analysis", "systematic review"}
 # NCBI literature repositories. A regular article here is Tier 2; promotion to
 # Tier 1 happens via the global systematic-review/meta-analysis rule below.
 _PUBMED_HOSTS = {"pubmed.ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov"}
+
+# .edu spam heuristics. University domains are routinely hijacked (abandoned
+# student pages, compromised CMS uploads, open redirects) to host SEO spam, and
+# that content must not inherit the university's Tier-3 credibility. A .edu URL
+# whose path/query shows any of these signals is demoted to Tier 4.
+#
+# Another URL injected into the path or query string (raw, percent-encoded, or a
+# bare "www."/TLD-like token). Only the path + query are checked, never the host.
+_INJECTED_URL_RE = re.compile(
+    r"(https?:|https?%3a|(?:^|[/=&?])www\.|[a-z0-9-]+\.(?:com|net|org|info|biz|xyz|top|"
+    r"club|shop|online|site|store|ru|cn)(?:[/?&=%]|$))",
+    re.IGNORECASE,
+)
+# Marketing / affiliate tracking parameters — legitimate university health pages
+# don't carry campaign or affiliate tags.
+_MARKETING_PARAM_RE = re.compile(
+    r"^(utm_\w+|gclid|fbclid|msclkid|dclid|ref|referrer|referral|affiliate|aff|"
+    r"aff_id|affid|promo|promocode|coupon|discount|campaign|cid|partner)$",
+    re.IGNORECASE,
+)
+# Redirect parameters and path segments (open redirects are the classic vector).
+_REDIRECT_PARAM_RE = re.compile(
+    r"^(\w+_)?(url|uri|redirect|redir|redirect_to|goto|go|dest|destination|target|"
+    r"next|return|returnto|link|out|forward|jump)$",
+    re.IGNORECASE,
+)
+_REDIRECT_PATH_SEGMENTS = {"redirect", "redir", "go", "goto", "out", "link", "click", "jump"}
 
 
 @dataclass
@@ -100,6 +128,16 @@ def classify_source(
         )
 
     # --- 5. Credentialed journalism & university health centers. ---
+    # A .edu host only earns Tier 3 when the URL itself looks like university
+    # content; hijacked/spam pages on university domains fall through to Tier 4.
+    if domain.endswith(".edu"):
+        spam_signal = _edu_spam_signal(url)
+        if spam_signal:
+            return SourceClassification(
+                SourceTier.TIER_4,
+                f"{domain} is a university domain but the URL shows spam indicators "
+                f"({spam_signal}) — likely hijacked content; context only, not evidence.",
+            )
     if _domain_in(domain, TIER_3_DOMAINS) or domain.endswith(".edu"):
         why = (
             "university health center"
@@ -127,6 +165,30 @@ def _is_high_evidence(pub_types_lower: set[str], source_name: str) -> bool:
         return True
     name = source_name.lower()
     return any(kw in name for kw in _TIER_1_PUB_TYPES)
+
+
+def _edu_spam_signal(url: str) -> str | None:
+    """Return a short description of the spam indicator found in `url`, or None.
+
+    Checks only the path and query string (never the host) for injected external
+    URLs, marketing/affiliate parameters, and redirect parameters or segments.
+    """
+    parsed = urlparse(url if "//" in url else f"//{url}")
+    path, query = parsed.path or "", parsed.query or ""
+
+    if _INJECTED_URL_RE.search(f"{path}?{query}"):
+        return "injected external URL"
+
+    segments = {seg.lower() for seg in path.split("/") if seg}
+    if segments & _REDIRECT_PATH_SEGMENTS:
+        return "redirect path"
+
+    for key, _ in parse_qsl(query, keep_blank_values=True):
+        if _MARKETING_PARAM_RE.match(key):
+            return f"marketing parameter '{key}'"
+        if _REDIRECT_PARAM_RE.match(key):
+            return f"redirect parameter '{key}'"
+    return None
 
 
 def _domain_of(url: str) -> str:
