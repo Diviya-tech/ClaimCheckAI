@@ -74,6 +74,18 @@ _NARRATIVE_SCHEMA: dict = {
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
+# User-readable limitation notes the builder itself can add.
+NOTE_NARRATIVE_BUDGET = (
+    "The daily token budget ran out before the plain-language summary could be "
+    "written; the summary below is an automatic tally of the verdicts."
+)
+NOTE_NARRATIVE_FAILED = (
+    "The plain-language summary could not be generated (the reasoning model "
+    "returned an unusable response); the summary below is an automatic tally of "
+    "the verdicts."
+)
+
+
 def build_dossier(
     original_input: str,
     claim_extraction: ClaimExtractionResult,
@@ -81,6 +93,7 @@ def build_dossier(
     source_format: SourceFormat = SourceFormat.TEXT,
     rhetorical_flags: list[RhetoricalFlag] | None = None,
     allow_over_budget: bool = False,
+    limitations: list[str] | None = None,
 ) -> Dossier:
     """Assemble the complete, UUID-stamped evidence dossier.
 
@@ -92,20 +105,28 @@ def build_dossier(
             value already lives on `claim_extraction`).
         rhetorical_flags: Flags from the verdict engine, if any.
         allow_over_budget: Forwarded to the narrative LLM call.
+        limitations: User-readable notes about what degraded THIS run upstream
+            (a source that was down, a budget cut at the verdict stage). The
+            builder appends its own note if the narrative call itself degrades.
 
     Returns:
-        A fully populated `Dossier`.
+        A fully populated `Dossier`. Always — a failed narrative call never
+        discards the verdicts; it degrades to a deterministic tally and says so.
     """
     flags = rhetorical_flags or []
-    narrative = _generate_narrative(
+    notes = list(limitations or [])
+    narrative, note = _generate_narrative(
         claim_extraction, verdicts, flags, allow_over_budget=allow_over_budget
     )
+    if note and note not in notes:
+        notes.append(note)
     return Dossier(
         original_input=original_input,
         claim_extraction=claim_extraction,
         verdicts=verdicts,
         rhetorical_flags=flags,
         narrative_summary=narrative,
+        limitations=notes,
     )
 
 
@@ -114,12 +135,21 @@ def _generate_narrative(
     verdicts: list[AtomicVerdict],
     flags: list[RhetoricalFlag],
     allow_over_budget: bool = False,
-) -> str:
-    """Write the plain-language summary (premium LLM), with a deterministic fallback."""
+) -> tuple[str, str]:
+    """Write the plain-language summary (premium LLM), with a deterministic fallback.
+
+    Returns (summary, limitation_note); the note is empty when the LLM summary
+    was produced normally.
+    """
     if not claim_extraction.claim_found or not verdicts:
-        return "No evaluable health claim was found in the provided input, so no evidence assessment was performed."
+        return (
+            "No evaluable health claim was found in the provided input, so no "
+            "evidence assessment was performed.",
+            "",
+        )
 
     prompt = _build_narrative_prompt(claim_extraction, verdicts, flags)
+    note = NOTE_NARRATIVE_FAILED
     try:
         result = providers.llm_call(
             prompt=prompt,
@@ -131,14 +161,15 @@ def _generate_narrative(
         assert isinstance(result, dict)
         summary = (result.get("narrative_summary") or "").strip()
         if summary:
-            return summary
+            return summary, ""
         logger.warning("Narrative call returned empty text; using deterministic summary.")
     except providers.BudgetWarning:
         logger.warning("Budget exhausted before narrative; using deterministic summary.")
+        note = NOTE_NARRATIVE_BUDGET
     except Exception as exc:  # noqa: BLE001 — the dossier must still assemble
         logger.warning("Narrative generation failed (%s); using deterministic summary.", exc)
 
-    return _fallback_narrative(claim_extraction, verdicts)
+    return _fallback_narrative(claim_extraction, verdicts), note
 
 
 def _build_narrative_prompt(
@@ -238,8 +269,18 @@ def format_dossier(dossier: Dossier) -> str:
     out.append(thin)
     out.append("NARRATIVE SUMMARY")
     out.append(_indent_wrap(dossier.narrative_summary, 2))
+    out.extend(_format_limitations(dossier.limitations))
     out.append(bar)
     return "\n".join(out)
+
+
+def _format_limitations(limitations: list[str]) -> list[str]:
+    if not limitations:
+        return []
+    lines = ["", "LIMITATIONS OF THIS RUN"]
+    for note in limitations:
+        lines.append(_indent_wrap(f"- {note}", 2))
+    return lines
 
 
 def _format_flags(flags: list[RhetoricalFlag]) -> list[str]:

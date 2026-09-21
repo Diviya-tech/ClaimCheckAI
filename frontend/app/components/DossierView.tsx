@@ -84,6 +84,21 @@ const STANCE_STYLE: Record<string, { label: string; className: string }> = {
   neutral: { label: "Context", className: "text-gray-600 bg-gray-100" },
 };
 
+// Applicability is shown only when it qualifies the evidence: "direct" is the
+// unremarkable default, so it gets no badge.
+const APPLICABILITY_STYLE: Record<string, { label: string; title: string; className: string }> = {
+  indirect: {
+    label: "Indirect",
+    title: "Related evidence, but a different form, dose, population, or outcome than the claim",
+    className: "text-amber-800 bg-amber-50 border border-amber-200",
+  },
+  non_human: {
+    label: "Animal / in-vitro",
+    title: "Studied in animals or cells — context for a human claim, never support or refutation",
+    className: "text-purple-800 bg-purple-50 border border-purple-200",
+  },
+};
+
 function TierBadge({ tier, label }: { tier: number; label?: string }) {
   const cls = TIER_BADGE[tier] ?? TIER_BADGE[4];
   return (
@@ -133,8 +148,9 @@ function formatDate(iso: string | null): string {
 
 function EvidenceRow({ ev }: { ev: Evidence }) {
   const stance = STANCE_STYLE[ev.evidence_stance] ?? STANCE_STYLE.neutral;
+  const applicability = APPLICABILITY_STYLE[ev.applicability];
   return (
-    <li className="rounded-md border border-border bg-surface p-3">
+    <li className="min-w-0 rounded-md border border-border bg-surface p-3">
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <TierBadge tier={ev.source_tier} label={ev.human_readable_tier} />
         <span
@@ -142,12 +158,20 @@ function EvidenceRow({ ev }: { ev: Evidence }) {
         >
           {stance.label}
         </span>
-        <span className="font-medium text-foreground">{ev.source_name}</span>
+        {applicability && (
+          <span
+            title={applicability.title}
+            className={`rounded px-1.5 py-0.5 text-xs font-medium ${applicability.className}`}
+          >
+            {applicability.label}
+          </span>
+        )}
+        <span className="min-w-0 break-words font-medium text-foreground">{ev.source_name}</span>
         <span className="text-muted">· {formatDate(ev.publication_date)}</span>
         <span className="text-muted">· relevance {ev.relevance_score.toFixed(2)}</span>
       </div>
       {ev.summary && (
-        <p className="mt-2 text-sm leading-relaxed text-gray-700">{ev.summary}</p>
+        <p className="mt-2 break-words text-sm leading-relaxed text-gray-700">{ev.summary}</p>
       )}
       {ev.source_url && (
         <a
@@ -175,26 +199,26 @@ function VerdictCard({ verdict, index }: { verdict: AtomicVerdict; index: number
 
   return (
     <article
-      className={`rounded-lg border border-border border-l-4 bg-surface p-5 shadow-sm ${accent}`}
+      className={`min-w-0 rounded-lg border border-border border-l-4 bg-surface p-4 shadow-sm sm:p-5 ${accent}`}
     >
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+        <div className="min-w-0">
           <span className="text-xs font-medium uppercase tracking-wide text-muted">
             Claim {index + 1} · {verdict.atomic_fact.fact_type}
           </span>
-          <h3 className="mt-1 text-base font-semibold leading-snug text-foreground">
+          <h3 className="mt-1 break-words text-base font-semibold leading-snug text-foreground">
             {verdict.atomic_fact.text}
           </h3>
         </div>
         <span
-          className={`shrink-0 rounded-full border px-3 py-1 text-sm font-semibold ${badge}`}
+          className={`self-start whitespace-nowrap rounded-full border px-3 py-1 text-sm font-semibold sm:shrink-0 ${badge}`}
         >
           {verdict.verdict}
         </span>
       </div>
 
       {verdict.reasoning && (
-        <p className="mt-3 text-sm leading-relaxed text-gray-700">
+        <p className="mt-3 break-words text-sm leading-relaxed text-gray-700">
           {verdict.reasoning}
         </p>
       )}
@@ -236,20 +260,70 @@ function FlagCard({ flag }: { flag: RhetoricalFlag }) {
   );
 }
 
-export default function DossierView({ dossier }: { dossier: Dossier }) {
+function ResetButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium text-gray-800 transition-colors hover:border-blue-400 hover:text-blue-800"
+    >
+      <span aria-hidden>↺</span> Try another claim
+    </button>
+  );
+}
+
+/* What degraded THIS run (a source that was down, the budget cutting the
+   verdict stage short). Shown prominently — a reader weighing the verdicts
+   needs to know what they're missing before they read the summary. */
+function LimitationsPanel({ notes }: { notes: string[] }) {
+  if (notes.length === 0) return null;
+  return (
+    <div
+      role="note"
+      className="rounded-lg border border-orange-200 bg-orange-50 p-4 text-sm text-orange-900"
+    >
+      <p className="font-semibold">Limitations of this run</p>
+      <ul className="mt-1.5 list-disc space-y-1 pl-5">
+        {notes.map((n, i) => (
+          <li key={i} className="break-words">{n}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default function DossierView({
+  dossier,
+  onReset,
+}: {
+  dossier: Dossier;
+  onReset?: () => void;
+}) {
   const { claim_extraction: extraction } = dossier;
+  const limitations = dossier.limitations ?? [];
 
   return (
-    <section className="w-full space-y-6">
+    <section className="w-full min-w-0 space-y-6">
       {/* Primary claim */}
-      <header className="rounded-lg border border-border bg-surface p-5 shadow-sm">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-          Claim assessed
-        </p>
-        <h2 className="mt-1 text-lg font-semibold leading-snug text-foreground">
-          {extraction.primary_claim || dossier.original_input}
-        </h2>
+      <header className="rounded-lg border border-border bg-surface p-4 shadow-sm sm:p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+              Claim assessed
+            </p>
+            <h2 className="mt-1 break-words text-lg font-semibold leading-snug text-foreground">
+              {extraction.primary_claim || dossier.original_input}
+            </h2>
+          </div>
+          {onReset && (
+            <div className="sm:shrink-0">
+              <ResetButton onClick={onReset} />
+            </div>
+          )}
+        </div>
       </header>
+
+      <LimitationsPanel notes={limitations} />
 
       {/* Rhetorical red flags */}
       {dossier.rhetorical_flags.length > 0 && (
@@ -288,10 +362,13 @@ export default function DossierView({ dossier }: { dossier: Dossier }) {
         </div>
       )}
 
-      {/* Subtle provenance */}
-      <footer className="border-t border-border pt-3 text-xs text-muted">
-        Dossier {dossier.id} · generated{" "}
-        {new Date(dossier.timestamp).toLocaleString()}
+      {/* Subtle provenance + a second way out at the bottom of a long page */}
+      <footer className="flex flex-col gap-3 border-t border-border pt-3 text-xs text-muted sm:flex-row sm:items-center sm:justify-between">
+        <span className="break-all">
+          Dossier {dossier.id} · generated{" "}
+          {new Date(dossier.timestamp).toLocaleString()}
+        </span>
+        {onReset && <ResetButton onClick={onReset} />}
       </footer>
     </section>
   );

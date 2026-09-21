@@ -54,6 +54,20 @@ Given a piece of text, do the following:
    produces belly-fat loss within two weeks". A reader (or a search engine) must
    never have to guess what the fact is about.
 
+   FORM & PREPARATION: When the claim names a specific preparation or form of a
+   substance — a tea, water, juice, smoothie, powder, oil, gummy, topical cream,
+   "raw", "organic" — the form is part of the claim and gets its OWN atomic
+   fact, separate from the effect. The evidence base usually studies a
+   standardized extract or capsule at a known dose, so a later stage must be
+   able to judge "does turmeric TEA deliver what the turmeric-extract trials
+   delivered?" independently of "does curcumin affect arthritis?". From
+   "Turmeric tea cures arthritis" emit BOTH:
+     - "Turmeric (curcumin) reduces arthritis symptoms." (causal)
+     - "Turmeric tea delivers curcumin at a dose comparable to the amounts
+       studied in clinical trials." (quantitative)
+   Never collapse the form into the effect; a claim about a food or drink is not
+   the same claim as one about a concentrated extract of it.
+
    HEDGED & LONG-FORM SOURCES: Articles and balanced journalism often wrap claims
    in uncertainty ("may help", "might reduce", "evidence is mixed", "modest
    effects", "some studies suggest"). Do NOT fold that hedging into a summary

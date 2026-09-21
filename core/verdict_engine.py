@@ -34,6 +34,7 @@ argued; they never change the evidence verdict.
 from __future__ import annotations
 
 import logging
+import re
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,7 @@ from schemas.models import (
     AtomicVerdict,
     ClaimExtractionResult,
     Evidence,
+    EvidenceApplicability,
     EvidenceStance,
     FactEvidence,
     RhetoricalFlag,
@@ -97,6 +99,19 @@ For EACH atomic fact, do all of the following:
    - "neutral": related/background, but it does not itself confirm or deny the fact
      (e.g. it studies a different population, a different dose, or is T4 context).
 
+1b. APPLICABILITY: Separately from stance, rate how directly each item applies
+   to THIS fact:
+   - "direct": it tested the same intervention in the same form (tea vs extract
+     vs capsule), in a human population the claim is aimed at, and measured the
+     outcome the fact asserts.
+   - "indirect": it is about the same topic but differs in form, dose, route,
+     population, or measures a proxy outcome. Indirect evidence can qualify a
+     verdict but cannot on its own establish or refute the fact.
+   Items marked [NON-HUMAN STUDY] were run in animals or cells. Their stance must
+   be "neutral": an effect in rats or a petri dish is context for a human claim,
+   never support or refutation of it. Say so in the reasoning when they are the
+   only evidence.
+
 2. WEIGH BY TIER: Higher tiers carry more weight. A single T1 meta-analysis
    outweighs several T3/T4 items pointing the other way. Never let T4 sources
    alone drive a "supported" or "refuted" verdict.
@@ -107,7 +122,8 @@ For EACH atomic fact, do all of the following:
 
 4. VERDICT: Assign EXACTLY ONE categorical verdict:
    - "Strongly Supported": strong, consistent higher-tier evidence supports it;
-     little or no credible opposition.
+     little or no credible opposition. Requires at least one DIRECT supporting
+     item — indirect evidence alone caps the verdict at Partially Supported.
    - "Partially Supported": real support, but qualified — limited, lower-tier,
      narrow conditions, or only part of the fact holds.
    - "Insufficient Evidence": not enough quality evidence was found to evaluate
@@ -124,7 +140,9 @@ For EACH atomic fact, do all of the following:
    - "Strongly Refuted": ONLY when the evidence DIRECTLY CONTRADICTS the fact — a
      study measured the specific thing claimed and found it false, or a systematic
      review explicitly concludes the claimed effect does not exist. The evidence
-     must be INCOMPATIBLE with the fact, not merely silent on it.
+     must be INCOMPATIBLE with the fact, not merely silent on it. Requires at
+     least one DIRECT opposing item — indirect evidence alone caps the verdict at
+     Partially Refuted.
    - "Too Vague to Evaluate": the fact itself is too vague, subjective, or
      unfalsifiable to test against evidence, regardless of what was retrieved.
 
@@ -191,7 +209,10 @@ dilute" rather than "Rule 6 applies".
 
 SEPARATELY, analyze the ORIGINAL claim text for rhetorical red flags — the WAY it
 is argued, independent of whether it is true. Only report patterns actually
-present; quote the triggering phrase in `excerpt`. Look for:
+present. Every flag MUST quote the triggering phrase VERBATIM from the claim
+text in `excerpt` — copy it character for character; do not paraphrase,
+summarize, or infer a tone the words themselves do not carry. A flag whose
+excerpt does not appear in the text is discarded. Look for:
   - Guaranteed / absolute outcomes ("melts fat", "cures", "guaranteed", "always").
   - Conspiracy framing ("doctors don't want you to know", "they're hiding this").
   - Appeal to nature ("it's natural, so it's safe/effective").
@@ -207,6 +228,12 @@ Return your analysis strictly matching the provided schema.
 # the Verdict / EvidenceStance definitions.
 _VERDICT_VALUES = [v.value for v in Verdict]
 _STANCE_VALUES = [s.value for s in EvidenceStance]
+# The model only ever chooses between direct and indirect; non_human is stamped
+# by retrieval and unknown is the pre-assessment default.
+_APPLICABILITY_VALUES = [
+    EvidenceApplicability.DIRECT.value,
+    EvidenceApplicability.INDIRECT.value,
+]
 
 _EVAL_SCHEMA: dict = {
     "type": "object",
@@ -244,8 +271,17 @@ _EVAL_SCHEMA: dict = {
                                     "type": "string",
                                     "enum": _STANCE_VALUES,
                                 },
+                                "applicability": {
+                                    "type": "string",
+                                    "enum": _APPLICABILITY_VALUES,
+                                    "description": (
+                                        "direct: same form, human population, tested "
+                                        "outcome; indirect: related but different "
+                                        "form/dose/population/outcome."
+                                    ),
+                                },
                             },
-                            "required": ["evidence_index", "stance"],
+                            "required": ["evidence_index", "stance", "applicability"],
                             "additionalProperties": False,
                         },
                     },
@@ -337,12 +373,15 @@ def evaluate(
             "Verdict evaluation failed (%s); degrading to Insufficient Evidence.", exc
         )
         return ClaimEvaluation(
-            verdicts=_fallback_verdicts(fact_evidence_list), rhetorical_flags=[]
+            verdicts=fallback_verdicts(fact_evidence_list), rhetorical_flags=[]
         )
 
     assert isinstance(result, dict)  # structured call always returns a dict
     verdicts = _assemble_verdicts(fact_evidence_list, result.get("fact_verdicts", []))
-    flags = _assemble_flags(result.get("rhetorical_flags", []))
+    flags = _assemble_flags(
+        result.get("rhetorical_flags", []),
+        original_text=f"{claim_extraction.original_text} {claim_extraction.primary_claim}",
+    )
     return ClaimEvaluation(verdicts=verdicts, rhetorical_flags=flags)
 
 
@@ -381,7 +420,8 @@ def _evidence_line(ev: Evidence) -> str:
     if len(snippet) > _EVIDENCE_SNIPPET_CHARS:
         snippet = snippet[:_EVIDENCE_SNIPPET_CHARS].rstrip() + "…"
     pub = ev.publication_date.date().isoformat() if ev.publication_date else "n.d."
-    return f"(T{ev.source_tier}) {ev.source_name} ({pub}): {snippet}"
+    tag = " [NON-HUMAN STUDY]" if ev.applicability is EvidenceApplicability.NON_HUMAN else ""
+    return f"(T{ev.source_tier}) {ev.source_name} ({pub}){tag}: {snippet}"
 
 
 # --------------------------------------------------------------------------- #
@@ -421,19 +461,33 @@ def _assemble_verdicts(
 
 
 def _build_verdict(fe: FactEvidence, raw: dict) -> AtomicVerdict:
-    """Build one AtomicVerdict, bucketing its evidence by assigned stance."""
+    """Build one AtomicVerdict, bucketing its evidence by assigned stance.
+
+    Two guardrails are enforced here in code rather than trusted to the prompt:
+      * animal / in-vitro evidence is always NEUTRAL (the animal-study filter);
+      * a "Strongly" verdict needs at least one DIRECT item pointing that way,
+        otherwise it is downgraded to the "Partially" verdict (the applicability
+        cap). The reasoning is annotated so the reader sees why.
+    """
     stance_by_idx: dict[int, str] = {}
+    applicability_by_idx: dict[int, str] = {}
     for s in raw.get("evidence_stances", []):
         idx = s.get("evidence_index")
         if isinstance(idx, int):
             stance_by_idx[idx] = s.get("stance", EvidenceStance.NEUTRAL.value)
+            applicability_by_idx[idx] = s.get("applicability", "")
 
     supporting: list[Evidence] = []
     opposing: list[Evidence] = []
     neutral: list[Evidence] = []
     for j, ev in enumerate(fe.evidence):
         stance = _coerce_stance(stance_by_idx.get(j))
-        stamped = ev.model_copy(update={"evidence_stance": stance})
+        applicability = _resolve_applicability(ev, applicability_by_idx.get(j))
+        if applicability is EvidenceApplicability.NON_HUMAN:
+            stance = EvidenceStance.NEUTRAL  # rats never support a human claim
+        stamped = ev.model_copy(
+            update={"evidence_stance": stance, "applicability": applicability}
+        )
         if stance is EvidenceStance.SUPPORTING:
             supporting.append(stamped)
         elif stance is EvidenceStance.OPPOSING:
@@ -441,14 +495,59 @@ def _build_verdict(fe: FactEvidence, raw: dict) -> AtomicVerdict:
         else:
             neutral.append(stamped)
 
+    verdict = _coerce_verdict(raw.get("verdict"))
+    reasoning = (raw.get("reasoning") or "").strip()
+    verdict, reasoning = _apply_applicability_cap(verdict, reasoning, supporting, opposing)
+
     return AtomicVerdict(
         atomic_fact=fe.atomic_fact,
-        verdict=_coerce_verdict(raw.get("verdict")),
+        verdict=verdict,
         supporting_evidence=supporting,
         opposing_evidence=opposing,
         neutral_evidence=neutral,
-        reasoning=(raw.get("reasoning") or "").strip(),
+        reasoning=reasoning,
     )
+
+
+def _resolve_applicability(ev: Evidence, raw_value: str | None) -> EvidenceApplicability:
+    """Retrieval's NON_HUMAN stamp is authoritative; otherwise take the model's call."""
+    if ev.applicability is EvidenceApplicability.NON_HUMAN:
+        return EvidenceApplicability.NON_HUMAN
+    try:
+        value = EvidenceApplicability(raw_value)
+    except ValueError:
+        return EvidenceApplicability.INDIRECT  # unrated evidence never counts as direct
+    if value is EvidenceApplicability.UNKNOWN:
+        return EvidenceApplicability.INDIRECT
+    return value
+
+
+_STRONG_TO_PARTIAL = {
+    Verdict.STRONGLY_SUPPORTED: Verdict.PARTIALLY_SUPPORTED,
+    Verdict.STRONGLY_REFUTED: Verdict.PARTIALLY_REFUTED,
+}
+_CAP_NOTE = (
+    " (Verdict capped at \"{partial}\": none of the {stance} evidence tested the "
+    "claim's own form and population directly.)"
+)
+
+
+def _apply_applicability_cap(
+    verdict: Verdict,
+    reasoning: str,
+    supporting: list[Evidence],
+    opposing: list[Evidence],
+) -> tuple[Verdict, str]:
+    """Downgrade a Strongly verdict that rests only on indirect evidence."""
+    partial = _STRONG_TO_PARTIAL.get(verdict)
+    if partial is None:
+        return verdict, reasoning
+    pool = supporting if verdict is Verdict.STRONGLY_SUPPORTED else opposing
+    if any(e.applicability is EvidenceApplicability.DIRECT for e in pool):
+        return verdict, reasoning
+    logger.info("Capping %s -> %s: no direct evidence.", verdict.value, partial.value)
+    stance = "supporting" if verdict is Verdict.STRONGLY_SUPPORTED else "opposing"
+    return partial, reasoning + _CAP_NOTE.format(partial=partial.value, stance=stance)
 
 
 def _coerce_stance(value: str | None) -> EvidenceStance:
@@ -466,24 +565,50 @@ def _coerce_verdict(value: str | None) -> Verdict:
         return Verdict.INSUFFICIENT_EVIDENCE
 
 
-def _assemble_flags(raw_flags: list[dict]) -> list[RhetoricalFlag]:
+def _assemble_flags(raw_flags: list[dict], original_text: str = "") -> list[RhetoricalFlag]:
+    """Map raw flags to typed ones, keeping only those bound to the claim text.
+
+    A flag is evidence-bound when its `excerpt` actually appears in the original
+    text (case- and whitespace-insensitive). Flags with no excerpt, or with an
+    excerpt the model paraphrased or invented, are dropped: a red flag the reader
+    can't find in the claim is an accusation, not an observation.
+    """
+    haystack = _normalize_for_match(original_text)
     flags: list[RhetoricalFlag] = []
     for f in raw_flags:
         pattern = (f.get("pattern") or "").strip()
+        excerpt = (f.get("excerpt") or "").strip()
         if not pattern:
+            continue
+        needle = _normalize_for_match(excerpt)
+        if not needle or (haystack and needle not in haystack):
+            logger.info("Dropping unbound rhetorical flag %r (excerpt %r).", pattern, excerpt)
             continue
         flags.append(
             RhetoricalFlag(
                 pattern=pattern,
                 explanation=(f.get("explanation") or "").strip(),
-                excerpt=(f.get("excerpt") or "").strip(),
+                excerpt=excerpt,
             )
         )
     return flags
 
 
-def _fallback_verdicts(fact_evidence_list: list[FactEvidence]) -> list[AtomicVerdict]:
-    """Insufficient-Evidence verdicts used when the premium call fails outright."""
+_QUOTE_CHARS = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def _normalize_for_match(text: str) -> str:
+    """Lowercase, fold curly quotes, and collapse whitespace for substring checks."""
+    return re.sub(r"\s+", " ", (text or "").translate(_QUOTE_CHARS)).strip().lower()
+
+
+def fallback_verdicts(fact_evidence_list: list[FactEvidence]) -> list[AtomicVerdict]:
+    """Insufficient-Evidence verdicts used when the premium call can't run.
+
+    Public because the orchestrator uses the same degradation when the token
+    budget is exhausted at the verdict stage: the evidence is attached as
+    neutral (unassessed) so the reader still sees what was found.
+    """
     return [
         AtomicVerdict(
             atomic_fact=fe.atomic_fact,

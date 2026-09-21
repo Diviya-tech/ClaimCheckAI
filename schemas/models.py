@@ -58,6 +58,22 @@ class EvidenceStance(str, Enum):
     NEUTRAL = "neutral"
 
 
+class EvidenceApplicability(str, Enum):
+    """How directly a piece of evidence bears on the fact it was retrieved for.
+
+    Stance says which WAY evidence points; applicability says how much it can
+    count. A rat study or a capsule-extract trial can *point* the same way as
+    the claim without being able to establish it for the claim's form or
+    population. Retrieval stamps NON_HUMAN deterministically (MeSH / keywords);
+    the verdict engine decides DIRECT vs INDIRECT for the rest.
+    """
+
+    DIRECT = "direct"          # same intervention/form, human population, tested outcome
+    INDIRECT = "indirect"      # related: different form, dose, population, or outcome proxy
+    NON_HUMAN = "non_human"    # animal, in-vitro, or cell-culture study
+    UNKNOWN = "unknown"        # not yet assessed (retrieval default)
+
+
 class Verdict(str, Enum):
     """The seven categorical verdicts. No numeric scores."""
 
@@ -148,6 +164,16 @@ class Evidence(BaseModel):
     evidence_stance: EvidenceStance = Field(
         default=EvidenceStance.NEUTRAL,
         description="Supporting / opposing / neutral relative to the fact (set by the verdict engine).",
+    )
+    applicability: EvidenceApplicability = Field(
+        default=EvidenceApplicability.UNKNOWN,
+        description=(
+            "How directly the evidence applies to the fact: direct (same form, "
+            "human population), indirect (related but different form/dose/"
+            "population), or non_human (animal / in-vitro — cannot establish a "
+            "human claim on its own). Retrieval stamps non_human; the verdict "
+            "engine assigns the rest."
+        ),
     )
     publication_date: datetime | None = Field(
         default=None,

@@ -1,10 +1,10 @@
 """API layer tests (weeks 9-10) — offline.
 
 These exercise the FastAPI adapter only: routing, the 'exactly one input' rule,
-status-code mapping, and Dossier/ClaimExtractionResult serialization. The whole
-pipeline is stubbed at the server boundary (`api.server.check_claim`,
-`retrieve_evidence`, `evaluate`, `build_dossier`), so no network or API key is
-touched.
+status-code mapping, the dossier cache, and Dossier/ClaimExtractionResult
+serialization. The whole pipeline is stubbed at the server boundary
+(`api.server.check_claim` and `api.server.complete_dossier`), so no network or
+API key is touched.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api import server
-from core.verdict_engine import ClaimEvaluation
 from schemas.models import (
     AtomicFact,
     AtomicVerdict,
@@ -75,16 +74,20 @@ def _dossier(extraction):
     )
 
 
+@pytest.fixture(autouse=True)
+def _fresh_cache():
+    """Every test starts with an empty dossier cache (it is process-global)."""
+    server.dossier_cache.clear()
+    yield
+    server.dossier_cache.clear()
+
+
 @pytest.fixture
 def stub_pipeline(monkeypatch):
     """Stub the full pipeline at the server boundary; return the extraction used."""
     extraction = _extraction(claim_found=True)
     monkeypatch.setattr(server, "check_claim", lambda **_kw: extraction)
-    monkeypatch.setattr(server, "retrieve_evidence", lambda facts: [])
-    monkeypatch.setattr(
-        server, "evaluate", lambda ex, fe: ClaimEvaluation(verdicts=[], rhetorical_flags=[])
-    )
-    monkeypatch.setattr(server, "build_dossier", lambda **_kw: _dossier(extraction))
+    monkeypatch.setattr(server, "complete_dossier", lambda ex, **_kw: _dossier(ex))
     return extraction
 
 
@@ -189,12 +192,11 @@ def test_check_budget_warning_is_503(monkeypatch):
 
 def test_check_pipeline_error_is_500(monkeypatch):
     monkeypatch.setattr(server, "check_claim", lambda **_kw: _extraction(True))
-    monkeypatch.setattr(server, "retrieve_evidence", lambda facts: [])
 
-    def _boom(ex, fe):
+    def _boom(ex, **_kw):
         raise RuntimeError("evaluator exploded")
 
-    monkeypatch.setattr(server, "evaluate", _boom)
+    monkeypatch.setattr(server, "complete_dossier", _boom)
     resp = client.post("/api/check", json={"text": "Cumin water melts belly fat."})
     assert resp.status_code == 500
     assert "pipeline error" in resp.json()["detail"].lower()

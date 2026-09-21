@@ -4,9 +4,13 @@ This is a thin adapter, not a second implementation. Every endpoint calls the
 exact same functions the CLI (`main.py`) uses:
 
     check_claim()      -> input normalization + claim extraction  (from main.py)
-    retrieve_evidence()-> stage 3                                 (core.evidence_retriever)
-    evaluate()         -> stage 4 (verdicts + rhetorical flags)   (core.verdict_engine)
-    build_dossier()    -> stage 5                                 (core.dossier_builder)
+    complete_dossier() -> retrieval -> verdicts -> dossier         (from main.py)
+
+The orchestrator owns stage sequencing, per-stage timing logs, and graceful
+degradation (a dead evidence source or a budget cut mid-run becomes a note in
+`Dossier.limitations`, never a failed request). The only pipeline behavior that
+lives here is HTTP: the in-memory dossier cache in front of text input, and the
+mapping of each failure mode to a status code and a user-readable message.
 
 Run it with:
 
@@ -26,9 +30,13 @@ Callers who already know they have a video can still say so explicitly via
 
 Status codes:
     400  bad input        (no/many inputs, invalid base64, unreadable URL/image/video)
+    413  too large        (text input over MAX_TEXT_CHARS)
     422  unprocessable    (input has no evaluable health claim -> /api/check only)
+    502  bad upstream     (the LLM returned unusable output twice in a row)
     503  unavailable      (token budget exhausted, or video deps not installed)
     500  pipeline error   (anything unexpected mid-pipeline)
+
+Every error body is `{"detail": "<plain-language message>"}` — never a traceback.
 """
 
 from __future__ import annotations
@@ -42,28 +50,37 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import providers
-from core.dossier_builder import build_dossier
-from core.evidence_retriever import retrieve_evidence
-from core.verdict_engine import evaluate
+from core.cache import dossier_cache
 from input.image_input import ImageExtractionError
 from input.url_input import URLExtractionError
 from input.video_input import VideoExtractionError
-from main import check_claim
+from main import check_claim, complete_dossier
 from schemas.models import ClaimExtractionResult, Dossier
 
 logger = logging.getLogger("claimcheck.api")
 
+# uvicorn configures only its own loggers; make sure the pipeline's stage-timing
+# and degradation logs reach the server console too. Idempotent: if the host
+# app already configured logging, basicConfig is a no-op.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
 # Where the frontend runs in development (Next.js default port).
 _FRONTEND_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
+# Longest pasted text we accept. A social post is a few hundred characters and a
+# long article a few tens of thousands; anything beyond this is not a claim to
+# check, it's a document, and it would only inflate the extraction prompt.
+MAX_TEXT_CHARS = 50_000
+
 app = FastAPI(
     title="ClaimCheck AI",
-    version="0.9.0",
+    version="1.0.0",
     summary="Evidence-evaluation engine for health claims.",
     description=(
         "Decomposes a health claim into atomic facts, retrieves evidence from "
@@ -167,6 +184,14 @@ def _require_exactly_one(req: CheckRequest) -> None:
             + (f" Got: {provided}." if provided else " Got none.")
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    if req.text is not None and len(req.text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            status_code=413,  # Content Too Large (literal: the constant was renamed across Starlette versions)
+            detail=(
+                f"Text input is too long ({len(req.text):,} characters; the limit is "
+                f"{MAX_TEXT_CHARS:,}). Paste the specific claim or passage you want checked."
+            ),
+        )
 
 
 def _decode_image(b64: str) -> tuple[bytes, str]:
@@ -275,6 +300,14 @@ def _safe_extract(req: CheckRequest) -> ClaimExtractionResult:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Daily token budget exhausted: {exc}",
         ) from exc
+    except providers.MalformedOutputError as exc:
+        # Already retried once inside the provider layer; the message is
+        # written for a user ("...usually transient — please try again").
+        logger.error("Malformed LLM output during extraction: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"The claim could not be extracted: {exc}",
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — surface a clean 500, log the trace
@@ -283,6 +316,26 @@ def _safe_extract(req: CheckRequest) -> ClaimExtractionResult:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Pipeline error during extraction: {exc}",
         ) from exc
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    """Last line of defence: no request ever answers with a raw traceback.
+
+    Everything the pipeline can raise is mapped explicitly above; this catches
+    what slipped through (a bug, a dependency blowing up outside the guarded
+    blocks). The trace goes to the server log, the client gets a sentence.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "detail": (
+                "ClaimCheck hit an unexpected internal error while processing this "
+                "request. It has been logged; please try again."
+            )
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -307,8 +360,20 @@ def extract(req: CheckRequest) -> ClaimExtractionResult:
 
 @app.post("/api/check", response_model=Dossier)
 def check(req: CheckRequest) -> Dossier:
-    """Full pipeline: extraction -> retrieval -> verdicts -> dossier."""
+    """Full pipeline: extraction -> retrieval -> verdicts -> dossier.
+
+    Text input is served from the in-memory cache when the exact same claim
+    (after normalization) was checked before: same dossier, same UUID, zero
+    tokens. URL / image / video inputs always run fresh.
+    """
     _require_exactly_one(req)
+
+    cacheable = req.text is not None and req.text.strip() != ""
+    if cacheable:
+        cached = dossier_cache.get(req.text)
+        if cached is not None:
+            return cached
+
     extraction = _safe_extract(req)
 
     if not extraction.claim_found:
@@ -320,20 +385,10 @@ def check(req: CheckRequest) -> Dossier:
         )
 
     try:
-        fact_evidence = retrieve_evidence(extraction.atomic_facts)
-        evaluation = evaluate(extraction, fact_evidence)
-        return build_dossier(
-            original_input=extraction.original_text,
-            claim_extraction=extraction,
-            verdicts=evaluation.verdicts,
-            source_format=extraction.source_format,
-            rhetorical_flags=evaluation.rhetorical_flags,
-        )
-    except providers.BudgetWarning as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Daily token budget exhausted: {exc}",
-        ) from exc
+        # Post-extraction failures (a dead source, the budget running out at the
+        # verdict stage, a failed narrative) degrade into `dossier.limitations`
+        # inside the orchestrator; only a genuine bug reaches the handler below.
+        dossier = complete_dossier(extraction)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -342,6 +397,10 @@ def check(req: CheckRequest) -> Dossier:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Pipeline error: {exc}",
         ) from exc
+
+    if cacheable:
+        dossier_cache.put(req.text, dossier)
+    return dossier
 
 
 @app.get("/")

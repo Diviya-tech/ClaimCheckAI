@@ -21,6 +21,7 @@ from schemas.models import (
     ClaimExtractionResult,
     Dossier,
     Evidence,
+    EvidenceApplicability,
     EvidenceStance,
     FactEvidence,
     FactType,
@@ -85,8 +86,8 @@ class TestVerdictEngine:
                     "verdict": "Strongly Refuted",
                     "reasoning": "A 2019 Cochrane review (T1) found no effect.",
                     "evidence_stances": [
-                        {"evidence_index": 0, "stance": "opposing"},
-                        {"evidence_index": 1, "stance": "neutral"},
+                        {"evidence_index": 0, "stance": "opposing", "applicability": "direct"},
+                        {"evidence_index": 1, "stance": "neutral", "applicability": "indirect"},
                     ],
                 }
             ],
@@ -102,6 +103,7 @@ class TestVerdictEngine:
         # Opposing evidence bucketed, and its stance stamped on the copy.
         assert [e.source_name for e in v.opposing_evidence] == ["Cochrane"]
         assert v.opposing_evidence[0].evidence_stance is EvidenceStance.OPPOSING
+        assert v.opposing_evidence[0].applicability is EvidenceApplicability.DIRECT
         assert [e.source_name for e in v.neutral_evidence] == ["RandomBlog"]
         assert v.supporting_evidence == []
 

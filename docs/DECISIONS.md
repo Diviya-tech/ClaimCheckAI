@@ -341,3 +341,149 @@ the *decided* verdicts rather than guessing alongside them. The fallback is the
 important half: the verdicts are the costliest artifact in the pipeline, so a
 failed *summary* call must never discard them — a dossier is always produced, just
 with a plainer summary. This mirrors the "degrade, don't crash" stance of ADR-009.
+
+---
+
+## ADR-015 — Animal and in-vitro studies are context, never evidence
+
+**Context.** PubMed returns rat, mouse, and cell-culture studies alongside human
+trials, and for supplement claims they are often the *majority* of hits. A
+model reading "curcumin reduced tumour growth in mice" as support for "turmeric
+cures cancer" is the single most common way an evidence-based system ends up
+over-stating a health claim.
+
+**Options considered.**
+1. Drop animal studies at retrieval — never show them.
+2. Keep them, tag them, and rely on the prompt to discount them.
+3. Keep them, tag them deterministically, **and** enforce in code that they can
+   only ever be neutral context.
+
+**Decision.** Option 3. `sources/pubmed.py` parses MeSH headings and flags an
+article `is_animal_study` when it carries `Animals` (or a species term) without
+`Humans`, with a keyword fallback for un-indexed or in-vitro work. Retrieval
+stamps such items `applicability = non_human`, ranks them below human evidence,
+keeps at most one per fact, and excludes them from the "enough evidence to
+evaluate" threshold. The verdict engine forces their stance to `neutral`
+regardless of what the model returned.
+
+**Why.** Dropping them (option 1) would hide real context the reader deserves to
+see — "the only evidence is in rats" is itself a finding. Trusting the prompt
+alone (option 2) leaves the guardrail one paraphrase away from failing. Enforcing
+it in code means the dossier can *show* the rat study, labelled as such, while
+guaranteeing it never becomes the reason a human claim is called supported.
+
+---
+
+## ADR-016 — Applicability as a second dimension of evidence, with a cap on "Strongly"
+
+**Context.** Stance (supporting / opposing / neutral) says which *way* evidence
+points. It says nothing about how much it can *count*: a capsule-extract trial in
+postmenopausal women can point the same way as "turmeric tea cures arthritis" and
+still be unable to establish it. The six reasoning rules in the prompt describe
+these gaps (form, dose, population, proxy outcome) but a rule in prose does not
+change a verdict.
+
+**Options considered.**
+1. Leave applicability to the reasoning text; trust the model to pick the right
+   verdict.
+2. Add `applicability` (`direct` / `indirect` / `non_human`) to every evidence
+   item and make the strongest verdicts *conditional* on direct evidence.
+
+**Decision.** Option 2. The model rates each item `direct` (same intervention and
+form, a human population the claim targets, the asserted outcome) or `indirect`.
+After the model answers, `Strongly Supported` is downgraded to `Partially
+Supported` unless at least one *direct* supporting item exists, and `Strongly
+Refuted` to `Partially Refuted` unless at least one *direct* opposing item does;
+the reasoning is annotated with the reason. Unrated evidence counts as indirect.
+
+**Why.** "Strongly" is the verdict a reader acts on, so it is the one that must
+be hardest to reach. Making it depend on a structured field the model fills per
+item — rather than on the model remembering a rule while writing a paragraph —
+turns the form/population rules from advice into a constraint, while leaving the
+model full latitude on everything below "Strongly". The field also surfaces in the
+UI ("Indirect", "Animal / in-vitro" badges), so the reader sees the gap, not just
+its consequence.
+
+---
+
+## ADR-017 — Granular decomposition: the form of a substance is its own atomic fact
+
+**Context.** Health claims on social media are overwhelmingly about *preparations*
+— turmeric tea, cumin water, celery juice, ACV gummies — while the literature
+studies *standardized extracts* at known doses. Decomposing "turmeric tea cures
+arthritis" into a single causal atom forces one verdict to answer two different
+questions: does curcumin affect arthritis, and does tea deliver curcumin?
+
+**Options considered.**
+1. One atom; rely on the verdict reasoning to mention the form gap.
+2. Emit a separate atomic fact for the form ("turmeric tea delivers curcumin at a
+   dose comparable to the amounts studied in clinical trials"), evidenced and
+   judged on its own.
+
+**Decision.** Option 2. The extractor prompt now treats a named preparation as
+part of the claim and emits a distinct (usually quantitative) atom for it.
+
+**Why.** This is ADR-002 (per-atom verdicts) applied to the gap that actually
+sinks most supplement claims. With two atoms the dossier can say the honest
+thing — effect *Partially Supported*, form *Strongly Refuted* — and the reader
+sees exactly where the claim breaks. It also gives the retriever a query aimed at
+dose/bioavailability literature instead of hoping the effect query surfaces it.
+The cost is one more atom per form-bearing claim, which is small next to the
+batched verdict call.
+
+---
+
+## ADR-018 — Rhetorical flags must be bound to text the reader can find
+
+**Context.** Rhetorical red flags (ADR-013) are the dossier's most
+accusatory output: "conspiracy framing", "emotional manipulation". A flag whose
+excerpt is a paraphrase ("the claim uses fear") or an inference the words don't
+carry ("act now before it's banned" on a claim that never said so) damages
+trust in every other flag and, by association, in the verdicts.
+
+**Options considered.**
+1. Ask the prompt for verbatim excerpts and trust it.
+2. Ask for verbatim excerpts **and** drop, in code, any flag whose excerpt does
+   not appear in the claim text.
+
+**Decision.** Option 2. `_assemble_flags` keeps a flag only if its `excerpt`
+occurs in the original text (case-, curly-quote- and whitespace-insensitive).
+Flags with an empty excerpt are dropped too.
+
+**Why.** A red flag is an *observation about the text*, so the text is its only
+admissible evidence — the same "show me the work" standard the verdicts are held
+to (ADR-001). The check is cheap, deterministic, and fails safe: the worst case
+is a missed flag, never an invented one. It also removes the incentive for the
+model to flag a soberly worded claim just because the category list was long.
+
+---
+
+## ADR-019 — `.edu` earns Tier 3 only when the URL looks like university content
+
+**Context.** The source classifier promoted any `.edu` host to Tier 3
+("university health center"). University domains are routinely hijacked —
+abandoned personal pages, compromised CMS uploads, open redirects — precisely
+*because* their credibility transfers to whatever is hosted there. An
+SEO-spam page about a supplement, sitting on `people.someuni.edu/~old/`, would
+outrank the same page on a blog.
+
+**Options considered.**
+1. Drop the blanket `.edu` rule; list trusted university health centers
+   individually.
+2. Keep the rule but demote a `.edu` URL whose path or query carries obvious
+   spam signals.
+
+**Decision.** Option 2. For `.edu` hosts only, the classifier scans the path and
+query string for an injected external URL (raw, percent-encoded, a bare `www.`,
+or a TLD-like token), marketing / affiliate parameters (`utm_*`, `gclid`, `ref`,
+`affiliate`, `promo`, …), and redirect parameters or path segments (`?url=`,
+`?redirect=`, `/go/`, `/redirect/`, …). Any hit demotes the source to Tier 4 with
+a justification naming the signal. The host itself is never inspected.
+
+**Why.** An allow-list (option 1) would be perpetually incomplete and would drop
+legitimate university content we haven't listed yet. The URL heuristics target
+the mechanics of hijacking rather than any particular spammer, cost nothing, and
+keep the classifier's transparency: the dossier states *why* a university link
+was not trusted. The one ordering caveat is deliberate — a title or PubMed
+publication type marking a systematic review still wins (rule 1 of the
+classifier), because that signal is stronger than the host.

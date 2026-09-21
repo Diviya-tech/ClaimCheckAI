@@ -55,6 +55,8 @@ class PubMedArticle:
     journal: str = ""
     publication_date: datetime | None = None
     publication_types: list[str] = field(default_factory=list)
+    mesh_terms: list[str] = field(default_factory=list)
+    is_animal_study: bool = False
 
     @property
     def url(self) -> str:
@@ -258,6 +260,8 @@ def _parse_one(entry) -> PubMedArticle | None:
         # No abstract -> nothing to evaluate; drop it.
         return None
 
+    mesh_terms = _parse_mesh_terms(citation.get("MeshHeadingList", []))
+
     return PubMedArticle(
         pmid=pmid,
         title=title,
@@ -267,6 +271,8 @@ def _parse_one(entry) -> PubMedArticle | None:
         journal=str(article.get("Journal", {}).get("Title", "")).strip(),
         publication_date=_parse_pub_date(article),
         publication_types=_parse_pub_types(article.get("PublicationTypeList", [])),
+        mesh_terms=mesh_terms,
+        is_animal_study=is_animal_study(mesh_terms, f"{title} {abstract}"),
     )
 
 
@@ -300,6 +306,58 @@ def _parse_authors(author_list) -> list[str]:
 
 def _parse_pub_types(pub_type_list) -> list[str]:
     return [str(pt).strip() for pt in pub_type_list if str(pt).strip()]
+
+
+def _parse_mesh_terms(mesh_heading_list) -> list[str]:
+    """Flatten a MeshHeadingList into descriptor names (e.g. ["Humans", "Rats"])."""
+    terms: list[str] = []
+    for heading in mesh_heading_list or []:
+        descriptor = heading.get("DescriptorName") if hasattr(heading, "get") else None
+        name = str(descriptor).strip() if descriptor is not None else ""
+        if name:
+            terms.append(name)
+    return terms
+
+
+# --------------------------------------------------------------------------- #
+# Animal / in-vitro study detection (token-free)
+# --------------------------------------------------------------------------- #
+# MeSH indexes every PubMed article with "Humans" and/or "Animals" (plus species
+# such as "Rats", "Mice"). That is the reliable signal: an article tagged
+# Animals but NOT Humans studied animals only. Cell-culture work has no
+# organism tag, so a keyword fallback on the title/abstract catches it, along
+# with recent articles MeSH hasn't indexed yet.
+_ANIMAL_MESH = {"animals", "rats", "mice", "rabbits", "dogs", "swine", "zebrafish",
+                "drosophila", "caenorhabditis elegans", "rodentia", "mice, inbred c57bl"}
+_NON_HUMAN_TEXT_RE = re.compile(
+    r"\b(in (?:male|female|adult|young|aged|obese|diabetic|healthy)? ?(?:mice|rats|rodents|"
+    r"rabbits|zebrafish|dogs|pigs|piglets|hamsters|guinea pigs|sheep|c57bl/6|wistar|"
+    r"sprague[- ]dawley)|murine|rodent model|animal model|in vitro|cell culture|"
+    r"cell line|cultured cells|hepg2|caco-2|raw ?264\.7|3t3-l1)\b",
+    re.IGNORECASE,
+)
+_HUMAN_TEXT_RE = re.compile(
+    r"\b(participants|patients|volunteers|subjects|men|women|adults|children|"
+    r"randomi[sz]ed|placebo|double-blind|cohort|clinical trial)\b",
+    re.IGNORECASE,
+)
+
+
+def is_animal_study(mesh_terms: list[str], text: str = "") -> bool:
+    """True if the article studied animals / cells and not humans.
+
+    MeSH wins when present: "Humans" anywhere -> human study; "Animals" (or a
+    species) without "Humans" -> animal study. Without MeSH, fall back to the
+    text: non-human keywords with no human-study vocabulary -> animal/in-vitro.
+    """
+    lowered = {t.lower() for t in mesh_terms}
+    if "humans" in lowered:
+        return False
+    if lowered & _ANIMAL_MESH:
+        return True
+    if not text:
+        return False
+    return bool(_NON_HUMAN_TEXT_RE.search(text)) and not _HUMAN_TEXT_RE.search(text)
 
 
 def _parse_pub_date(article) -> datetime | None:

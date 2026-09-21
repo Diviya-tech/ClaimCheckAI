@@ -12,6 +12,11 @@ export type Verdict =
 
 export type EvidenceStance = "supporting" | "opposing" | "neutral";
 
+// How directly a piece of evidence applies to the fact: same form + human
+// population (direct), related but different form/dose/population (indirect),
+// or an animal / in-vitro study (non_human — context only, never support).
+export type EvidenceApplicability = "direct" | "indirect" | "non_human" | "unknown";
+
 export type FactType =
   | "causal"
   | "quantitative"
@@ -30,6 +35,7 @@ export interface Evidence {
   human_readable_tier: string;
   relevance_score: number; // 0..1
   evidence_stance: EvidenceStance;
+  applicability: EvidenceApplicability;
   publication_date: string | null;
 }
 
@@ -70,6 +76,9 @@ export interface Dossier {
   verdicts: AtomicVerdict[];
   rhetorical_flags: RhetoricalFlag[];
   narrative_summary: string;
+  // Plain-language notes about anything that degraded this run (a source that
+  // was down, a budget cut mid-pipeline). Empty for a clean run.
+  limitations: string[];
 }
 
 // The three input modes the UI offers (video is supported by the API too,

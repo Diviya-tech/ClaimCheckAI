@@ -4,15 +4,15 @@
 
 **An evidence-evaluation engine for health claims — it decomposes what you see on social media into atomic facts and weighs each one against trusted medical literature.**
 
-![Status](https://img.shields.io/badge/status-API%20%2B%20web%20UI%20live%20(wk%201--10)-brightgreen)
+![Status](https://img.shields.io/badge/status-v1.0%20complete%20(wk%201--12)-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-123%20passing-success)
+![Tests](https://img.shields.io/badge/tests-230%20passing-success)
 ![LLM](https://img.shields.io/badge/LLM-agnostic-8A2BE2)
 ![Approach](https://img.shields.io/badge/verdicts-categorical%2C%20not%20scores-orange)
 
 *Not a truth machine. An evidence dossier builder.*
 
-**End to end today:** paste a health claim and get back a full evidence dossier — atomic facts, per-fact categorical verdicts, cited medical literature with source-tier badges, rhetorical red flags, and a plain-language summary.
+**End to end today:** paste a health claim and get back a full evidence dossier — atomic facts, per-fact categorical verdicts, cited medical literature with source-tier badges, rhetorical red flags, and a plain-language summary. Hardened so a dead source, a missing key, or an exhausted token budget degrades into a *note on the dossier*, never a failed request.
 
 </div>
 
@@ -125,7 +125,17 @@ Not every step needs a genius. Claim extraction and classification run on a **ch
 Retrieval is **vector search + free medical APIs** (PubMed, WHO, CDC), not an LLM "searching" for you. LLM-powered retrieval burns tokens to do what a vector database does better and for free. We spend tokens on *reasoning*, not on lookup.
 
 ### Source quality tiers
-Not all evidence is equal. A Cochrane systematic review is not a wellness blog. Every source is tagged Tier 1–4, and verdicts weigh higher-tier evidence accordingly — so a meta-analysis can't be drowned out by ten SEO articles.
+Not all evidence is equal. A Cochrane systematic review is not a wellness blog. Every source is tagged Tier 1–4, and verdicts weigh higher-tier evidence accordingly — so a meta-analysis can't be drowned out by ten SEO articles. Spam hijacking a `.edu` domain is caught by URL heuristics and demoted to Tier 4 rather than inheriting the university's credibility.
+
+### Reasoning rules, enforced in code as well as in the prompt
+The verdict engine's prompt carries six explicit scientific-reasoning rules — *absence of evidence is not refutation*, *a trial's duration is not a threshold*, *statistically significant is not clinically meaningful*, *association is not causation*, *works in population X is not works for everyone*, *an extract is not the food that contains it*. Four **reasoning-integrity guardrails** back the prompt with deterministic checks so a model that over-reads an abstract still can't over-state a verdict:
+
+| Guardrail | What it does |
+|-----------|--------------|
+| **Animal-study filter** | PubMed MeSH terms (and a keyword fallback) tag animal / in-vitro studies. They are ranked below human evidence, capped at one per fact, don't count toward "enough evidence to evaluate", and are forced to a *neutral* stance — a rat study can never support or refute a human claim. |
+| **Evidence applicability** | Every evidence item is rated `direct` (same form, human population, tested outcome) or `indirect`. A *Strongly Supported / Refuted* verdict requires at least one direct item pointing that way; otherwise it is capped at *Partially* and the reasoning says why. |
+| **Granular form decomposition** | "Turmeric **tea** cures arthritis" yields a separate atomic fact for the form ("turmeric tea delivers curcumin at a dose comparable to the trials"), so the extract-vs-tea gap gets its own verdict instead of being blurred into the effect. |
+| **Evidence-bound rhetoric** | A rhetorical red flag is kept only if its quoted excerpt actually appears in the claim text. Paraphrased or inferred flags are dropped: a flag the reader can't find in the claim is an accusation, not an observation. |
 
 ---
 
@@ -173,7 +183,7 @@ Each tool was chosen for a *project-specific* reason, not popularity:
 | **yt-dlp + Whisper** | Misinformation is video-native; this pair turns a TikTok/YouTube link into a transcript. |
 | **Tavily** | Purpose-built search API for LLM pipelines — supplementary evidence when the corpus is thin. |
 | **Tavily / free APIs over paid search** | Evidence retrieval must stay token- and dollar-cheap to scale to consumers. |
-| **pytest** | A claim-checker is only as trustworthy as its test suite; 123 offline tests run with no API key. |
+| **pytest** | A claim-checker is only as trustworthy as its test suite; 230 offline tests run with no API key. |
 | **FastAPI + uvicorn** | Typed, async HTTP layer that wraps the pipeline with zero logic duplication; Pydantic models become the API schema for free. |
 | **Next.js + Tailwind** | The dossier is visual — tier badges, verdict tables, clickable sources — so it gets a real, minimal UI (Google Scholar meets Perplexity). |
 
@@ -186,11 +196,11 @@ ClaimCheckAI/
 ├── README.md                  # You are here
 ├── CLAUDE.md                  # Project spec & working context
 ├── requirements.txt           # Dependencies, grouped by pipeline stage
-├── main.py                     # Pipeline orchestrator + CLI
+├── main.py                     # Pipeline orchestrator (stage sequencing, timing, degradation) + CLI
 ├── start_server.py             # (wk 9-10) API launcher (= uvicorn api.server:app)
 │
 ├── api/
-│   └── server.py               # (wk 9-10) FastAPI HTTP interface over the pipeline
+│   └── server.py               # (wk 9-10) FastAPI HTTP interface + dossier cache + error mapping
 │
 ├── frontend/                   # (wk 9-10) Next.js + Tailwind web UI
 │   └── app/
@@ -209,11 +219,12 @@ ClaimCheckAI/
 │   └── video_input.py          # (wk 4) video → yt-dlp + Whisper → text
 │
 ├── core/
-│   ├── claim_extractor.py      # Extract + decompose claims into atomic facts
-│   ├── evidence_retriever.py   # (wk 5-6) vector + API evidence search
-│   ├── source_classifier.py    # (wk 5-6) tag sources into quality tiers
-│   ├── verdict_engine.py       # (wk 7-8) per-atom categorical verdicts
-│   └── dossier_builder.py      # (wk 7-8) assemble the evidence dossier
+│   ├── claim_extractor.py      # Extract + decompose claims into atomic facts (incl. form facts)
+│   ├── evidence_retriever.py   # (wk 5-6) PubMed + web evidence search, animal-study handling, source notes
+│   ├── source_classifier.py    # (wk 5-6) tag sources into quality tiers (+ .edu spam demotion)
+│   ├── verdict_engine.py       # (wk 7-8) per-atom verdicts, applicability cap, evidence-bound flags
+│   ├── dossier_builder.py      # (wk 7-8) assemble the evidence dossier (+ limitations)
+│   └── cache.py                # (wk 11-12) in-memory LRU dossier cache keyed on claim text
 │
 ├── sources/                    # (wk 5-6) PubMed + web-search clients
 ├── schemas/
@@ -221,10 +232,12 @@ ClaimCheckAI/
 │                               #   RhetoricalFlag, Dossier (UUID-stamped)
 ├── tests/
 │   ├── test_claims.py          # extraction, input handlers, provider layer
-│   ├── test_evidence.py        # (wk 5-6) retrieval, ranking, source tiers
+│   ├── test_evidence.py        # (wk 5-6) retrieval, ranking, source tiers, .edu spam
 │   ├── test_verdicts.py        # (wk 7-8) verdict logic, flags, dossier assembly
-│   └── test_api.py             # (wk 9-10) FastAPI endpoints, status codes
-│                               #   → 123 offline tests total (LLM layer stubbed)
+│   ├── test_api.py             # (wk 9-10) FastAPI endpoints, status codes, cache
+│   ├── test_claim_corpus.py    # (wk 11-12) diverse claim types + edge-case inputs
+│   └── test_hardening.py       # (wk 11-12) degradation, retries, budget, cache, reasoning guardrails
+│                               #   → 230 offline tests total (LLM layer stubbed)
 ├── data/test_inputs/           # Fixtures for end-to-end testing
 └── docs/
     ├── ARCHITECTURE.md         # Deep technical design
@@ -300,7 +313,11 @@ override with `NEXT_PUBLIC_API_BASE` if you host the API elsewhere.
 | `POST /api/extract` | `text` · `url` · `image` (base64) · `video_url` | `ClaimExtractionResult` (fast path — extraction only) |
 | `POST /api/check` | same | full `Dossier` (extraction → evidence → verdicts → narrative) |
 
-Status codes: `400` bad input · `422` no evaluable health claim · `503` token budget exhausted · `500` pipeline error.
+Status codes: `400` bad input · `413` text too long · `422` no evaluable health claim · `502` LLM returned unusable output (after one automatic retry) · `503` token budget exhausted / video dependency missing · `500` pipeline error. Every error body is `{"detail": "<plain-language message>"}` — never a traceback.
+
+**Graceful degradation.** Once a claim has been extracted, the request always answers with a dossier. PubMed down → web-only evidence; no `TAVILY_API_KEY` → PubMed-only; token budget exhausted at the verdict stage → facts marked *Insufficient Evidence* with their evidence shown unassessed. Each case is written into `dossier.limitations` (rendered as a "Limitations of this run" panel) so the reader knows what the verdicts are missing.
+
+**Cache & timing.** The exact same claim text (after normalization) returns the cached dossier — same UUID, zero tokens. The server console logs how long each stage took (`[timing] retrieve 12.40s`, …); add `--verbose` to the CLI for the same.
 
 ---
 
@@ -387,11 +404,11 @@ whole-claim verdict could never say both.
 | Evidence retrieval (PubMed + Tavily; Qdrant next iteration) | 5–6 | ✅ **Done** |
 | Verdict engine + dossier builder + rhetorical flags | 7–8 | ✅ **Done** |
 | FastAPI backend + Next.js frontend | 9–10 | ✅ **Done** |
-| Testing, edge cases, semantic caching | 11–12 | ⬜ Next |
+| Testing, error hardening, frontend polish, in-memory caching | 11–12 | ✅ **Done** |
 
-**What's built today — the full pipeline runs end to end, via CLI *and* a web app:** input normalization across all four modalities (text, URL, screenshot, video), claim extraction into classified self-contained atomic facts, zero-LLM-token evidence retrieval from PubMed + web search with source-tier classification, the verdict engine (per-atom categorical verdicts, evidence-stance classification, and rhetorical red-flag detection in one batched premium call), and the dossier builder with a plain-language narrative summary. This same pipeline is exposed as a **FastAPI backend** and driven by a clean **Next.js + Tailwind frontend**. All wired through the LLM-agnostic provider layer with two-tier routing and a soft token budget, backed by strict Pydantic schemas with enforced invariants and a **123-test offline suite**.
+**What's built today — the full pipeline runs end to end, via CLI *and* a web app:** input normalization across all four modalities (text, URL, screenshot, video), claim extraction into classified self-contained atomic facts, zero-LLM-token evidence retrieval from PubMed + web search with source-tier classification, the verdict engine (per-atom categorical verdicts, evidence-stance classification, and rhetorical red-flag detection in one batched premium call), and the dossier builder with a plain-language narrative summary. This same pipeline is exposed as a **FastAPI backend** and driven by a clean **Next.js + Tailwind frontend** (staged progress indicator, one-click example claims, "Try another claim", limitations panel, phone-width layout). All wired through the LLM-agnostic provider layer with two-tier routing, a soft token budget, and one automatic retry on malformed structured output; backed by strict Pydantic schemas with enforced invariants and a **230-test offline suite** covering ambiguous, multi-claim, no-claim, sarcastic, vague, well-supported, form-mismatch, association-vs-causation and wrong-population claims plus empty, huge, special-character and non-English inputs.
 
-> **Note on Qdrant:** evidence retrieval currently runs on PubMed (Biopython) + Tavily with a lexical relevance proxy. The Qdrant vector-search corpus slots in behind the same 0–1 relevance interface in a later iteration — no downstream changes needed.
+**Later iterations (not scheduled):** a Qdrant vector corpus behind the same 0–1 relevance interface (retrieval today is PubMed via Biopython + Tavily with a lexical relevance proxy), semantic caching of *paraphrased* claims (today's cache is exact-text), and a persistent dossier store for the UUID-based sharing the schema already anticipates.
 
 ---
 

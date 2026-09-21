@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import DossierView from "./components/DossierView";
 import { ApiError, checkClaim, fileToDataUrl } from "./lib/api";
 import type { CheckRequest, Dossier, InputMode } from "./lib/types";
@@ -11,6 +11,46 @@ const MODES: { id: InputMode; label: string; hint: string }[] = [
   { id: "image", label: "Screenshot", hint: "Upload a screenshot" },
 ];
 
+// One-click starters. Chosen to show the range of verdicts the engine
+// produces, not to flatter it: a well-supported claim, a form-mismatch claim,
+// a correlation-vs-causation claim, and a classic social-media miracle.
+const EXAMPLE_CLAIMS = [
+  "Vaccines prevent measles",
+  "Turmeric tea cures arthritis",
+  "People who drink coffee live longer",
+  "Cumin water melts belly fat in two weeks",
+];
+
+// The API is a single request, so the UI can't observe stage boundaries. The
+// stages below advance on wall-clock estimates that track the real pipeline
+// (extraction ~3s on the lightweight model; retrieval ~10-20s of PubMed/Tavily
+// traffic; one batched premium verdict call; one narrative call). If a stage
+// runs long the label simply waits on the last one — it never claims "done".
+const LOADING_STAGES: { label: string; at: number }[] = [
+  { label: "Extracting claim…", at: 0 },
+  { label: "Searching evidence…", at: 4_000 },
+  { label: "Evaluating verdicts…", at: 22_000 },
+  { label: "Building dossier…", at: 40_000 },
+];
+
+function useLoadingStage(loading: boolean): number {
+  // `stage` only advances via timers while a request is in flight; when the
+  // request ends the timers are cleared and the value is ignored (the caller
+  // reads 0), so a new request always starts from the first stage.
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    if (!loading) return;
+    const timers = [
+      setTimeout(() => setStage(0), 0),
+      ...LOADING_STAGES.slice(1).map((s, i) =>
+        setTimeout(() => setStage(i + 1), s.at),
+      ),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [loading]);
+  return loading ? stage : 0;
+}
+
 export default function Home() {
   const [mode, setMode] = useState<InputMode>("text");
   const [text, setText] = useState("");
@@ -20,6 +60,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dossier, setDossier] = useState<Dossier | null>(null);
+
+  const stage = useLoadingStage(loading);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   function switchMode(next: InputMode) {
     setMode(next);
@@ -67,6 +110,25 @@ export default function Home() {
     }
   }
 
+  function fillExample(claim: string) {
+    setMode("text");
+    setText(claim);
+    setError(null);
+    textareaRef.current?.focus();
+  }
+
+  function reset() {
+    setDossier(null);
+    setError(null);
+    setText("");
+    setUrl("");
+    setImageFile(null);
+    setMode("text");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    // Focus after the scroll starts so the caret lands in the visible box.
+    setTimeout(() => textareaRef.current?.focus(), 150);
+  }
+
   return (
     <main className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-4 py-10 sm:py-16">
       {/* Header */}
@@ -107,6 +169,7 @@ export default function Home() {
         {/* Input area (one at a time — like a search bar, not a form) */}
         {mode === "text" && (
           <textarea
+            ref={textareaRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
             placeholder="e.g. Cumin water melts belly fat in two weeks"
@@ -144,7 +207,7 @@ export default function Home() {
         )}
 
         {/* Submit */}
-        <div className="mt-3 flex items-center justify-between">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs text-muted">
             {MODES.find((m) => m.id === mode)?.hint}
           </span>
@@ -164,12 +227,55 @@ export default function Home() {
         </div>
       </form>
 
-      {/* Loading message */}
+      {/* Example claims — only while there's nothing else on screen */}
+      {!loading && !dossier && (
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+          <span className="text-xs text-muted">Try:</span>
+          {EXAMPLE_CLAIMS.map((claim) => (
+            <button
+              key={claim}
+              type="button"
+              onClick={() => fillExample(claim)}
+              className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-gray-700 transition-colors hover:border-blue-400 hover:text-blue-800"
+            >
+              {claim}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Staged loading indicator */}
       {loading && (
-        <p className="mt-6 text-center text-sm text-muted">
-          Analyzing claim — decomposing into facts, retrieving evidence, and
-          weighing sources. This can take up to a minute.
-        </p>
+        <div
+          role="status"
+          aria-live="polite"
+          className="mt-8 rounded-lg border border-border bg-surface p-5 text-center shadow-sm"
+        >
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-[3px] border-blue-100 border-t-blue-600" />
+          <p className="mt-3 text-sm font-medium text-foreground">
+            {LOADING_STAGES[stage].label}
+          </p>
+          <ol className="mx-auto mt-3 flex max-w-md flex-wrap justify-center gap-x-4 gap-y-1 text-xs">
+            {LOADING_STAGES.map((s, i) => (
+              <li
+                key={s.label}
+                className={
+                  i < stage
+                    ? "text-green-700"
+                    : i === stage
+                      ? "font-semibold text-blue-700"
+                      : "text-gray-400"
+                }
+              >
+                {i < stage ? "✓ " : `${i + 1}. `}
+                {s.label.replace("…", "")}
+              </li>
+            ))}
+          </ol>
+          <p className="mt-3 text-xs text-muted">
+            Searching PubMed and weighing sources can take up to a minute.
+          </p>
+        </div>
       )}
 
       {/* Error */}
@@ -182,12 +288,13 @@ export default function Home() {
       {/* Result */}
       {dossier && !loading && (
         <div className="mt-8">
-          <DossierView dossier={dossier} />
+          <DossierView dossier={dossier} onReset={reset} />
         </div>
       )}
 
-      <footer className="mt-auto pt-10 text-center text-xs text-muted">
-        ClaimCheck AI · an evidence dossier builder, not a truth machine.
+      <footer className="mt-auto space-y-1 pt-10 text-center text-xs text-muted">
+        <p>Evidence sourced from PubMed, WHO, CDC. ClaimCheck AI does not provide medical advice.</p>
+        <p>An evidence dossier builder, not a truth machine.</p>
       </footer>
     </main>
   );

@@ -26,7 +26,7 @@ import re
 
 from config import providers
 from core.source_classifier import classify_source
-from schemas.models import AtomicFact, Evidence, FactEvidence
+from schemas.models import AtomicFact, Evidence, EvidenceApplicability, FactEvidence
 from sources import pubmed, web_search
 
 logger = logging.getLogger("claimcheck.evidence_retriever")
@@ -53,6 +53,32 @@ _INSUFFICIENT_EVIDENCE_NOTE = "insufficient evidence found"
 # head start, but a highly-relevant lower-tier result can still outrank a barely
 # relevant top-tier one. Keeps "rank by relevance AND tier" honest.
 _TIER_BONUS = {1: 0.30, 2: 0.20, 3: 0.10, 4: 0.0}
+
+# Animal / in-vitro studies are kept (they are real context and the dossier
+# should show them) but never allowed to crowd out human evidence: they take a
+# ranking penalty, at most this many survive per fact, and they don't count
+# toward the "enough evidence to evaluate" threshold. A claim aimed at people
+# cannot be established by rats.
+_NON_HUMAN_PENALTY = 0.25
+_MAX_NON_HUMAN_PER_FACT = 1
+
+# User-readable notes for degraded retrieval. Attached to every affected fact and
+# bubbled up to `Dossier.limitations` so the reader knows what the verdict lacks.
+NOTE_PUBMED_DOWN = (
+    "PubMed was unavailable during this check; evidence came from web sources only."
+)
+NOTE_WEB_SKIPPED = (
+    "Supplementary web search was skipped (no TAVILY_API_KEY configured); "
+    "evidence came from PubMed only."
+)
+NOTE_WEB_DOWN = (
+    "Supplementary web search was unavailable during this check; evidence came "
+    "from PubMed only."
+)
+NOTE_ALL_SOURCES_DOWN = (
+    "No evidence source was reachable during this check; verdicts are based on "
+    "no retrieved evidence."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +174,8 @@ def retrieve_evidence(
 
         # PubMed first; the PMIDs it returns let us de-dup (and clean up) any
         # PubMed/PMC links the web search later turns up.
-        pubmed_evidence, known_pmids = _search_pubmed(queries, fact.text)
-        web_evidence = _search_web(queries, known_pmids, fact.text)
+        pubmed_evidence, known_pmids, pubmed_note = _search_pubmed(queries, fact.text)
+        web_evidence, web_note = _search_web(queries, known_pmids, fact.text)
 
         evidence = _dedupe_by_url(pubmed_evidence + web_evidence)
 
@@ -157,47 +183,87 @@ def retrieve_evidence(
         # irrelevant high-tier source to the top.
         relevant = [e for e in evidence if e.relevance_score >= RELEVANCE_FLOOR]
         relevant.sort(key=_rank_score, reverse=True)
-        top = relevant[:per_fact_limit]
+        top = _cap_non_human(relevant)[:per_fact_limit]
 
-        note = "" if len(top) >= _MIN_SUFFICIENT_EVIDENCE else _INSUFFICIENT_EVIDENCE_NOTE
+        human_count = sum(1 for e in top if not _is_non_human(e))
+        note = "" if human_count >= _MIN_SUFFICIENT_EVIDENCE else _INSUFFICIENT_EVIDENCE_NOTE
         if note:
             logger.info(
-                "Fact %r: only %d relevant item(s) cleared the floor (%s).",
-                fact.text, len(top), note,
+                "Fact %r: only %d relevant human-study item(s) cleared the floor (%s).",
+                fact.text, human_count, note,
             )
 
-        results.append(FactEvidence(atomic_fact=fact, evidence=top, retrieval_note=note))
+        results.append(
+            FactEvidence(
+                atomic_fact=fact,
+                evidence=top,
+                retrieval_note=note,
+                source_notes=_merge_source_notes(pubmed_note, web_note),
+            )
+        )
 
     return results
+
+
+def collect_limitations(fact_evidence: list[FactEvidence]) -> list[str]:
+    """Unique, order-preserving source notes across all facts (for the dossier)."""
+    seen: set[str] = set()
+    notes: list[str] = []
+    for fe in fact_evidence:
+        for note in fe.source_notes:
+            if note and note not in seen:
+                seen.add(note)
+                notes.append(note)
+    return notes
+
+
+def _merge_source_notes(pubmed_note: str, web_note: str) -> list[str]:
+    """Collapse per-source failure notes into what the reader needs to know."""
+    if pubmed_note and web_note:
+        return [NOTE_ALL_SOURCES_DOWN]
+    return [n for n in (pubmed_note, web_note) if n]
 
 
 # --------------------------------------------------------------------------- #
 # Per-source search (each resilient — a failing source is logged, not fatal)
 # --------------------------------------------------------------------------- #
-def _search_pubmed(queries: list[str], fact_text: str) -> tuple[list[Evidence], set[str]]:
+def _search_pubmed(
+    queries: list[str], fact_text: str
+) -> tuple[list[Evidence], set[str], str]:
     """Search PubMed across all queries, de-duping by PMID.
 
-    Returns the Evidence list plus the set of PMIDs seen, so the web search can
-    recognize and drop/clean PubMed links pointing at the same articles.
+    Returns the Evidence list, the set of PMIDs seen (so the web search can
+    recognize and drop/clean PubMed links pointing at the same articles), and a
+    user-readable note if PubMed was down for EVERY query (a partial failure
+    with some results still counts as PubMed having answered).
     """
     seen_pmids: set[str] = set()
     evidence: list[Evidence] = []
+    failures = 0
     for query in queries:
         try:
             articles = pubmed.search_pubmed(query, max_results=_PUBMED_FETCH)
         except (pubmed.PubMedError, ValueError) as exc:
             logger.warning("PubMed search failed for %r: %s", query, exc)
+            failures += 1
             continue
         for article in articles:
             if article.pmid in seen_pmids:
                 continue
             seen_pmids.add(article.pmid)
             evidence.append(_pubmed_to_evidence(article, fact_text))
-    return evidence, seen_pmids
+    note = NOTE_PUBMED_DOWN if queries and failures == len(queries) else ""
+    return evidence, seen_pmids, note
 
 
-def _search_web(queries: list[str], known_pmids: set[str], fact_text: str) -> list[Evidence]:
+def _search_web(
+    queries: list[str], known_pmids: set[str], fact_text: str
+) -> tuple[list[Evidence], str]:
     """Search the web with the best (first) query and convert to Evidence.
+
+    Returns the Evidence list and a user-readable note when the search could not
+    run: distinguishes "not configured" (no key — a deliberate PubMed-only setup)
+    from "down" (configured but failing).
 
     Web results that point at a PubMed/PMC article are reconciled with the PubMed
     API results instead of being trusted as-is (Tavily often scrapes the page's
@@ -208,12 +274,13 @@ def _search_web(queries: list[str], known_pmids: set[str], fact_text: str) -> li
     `known_pmids` is updated in place as new PubMed articles are pulled in.
     """
     if not queries:
-        return []
+        return [], ""
     try:
         hits = web_search.search_web(queries[0], max_results=_WEB_FETCH)
     except (web_search.WebSearchError, ValueError) as exc:
         logger.warning("Web search failed for %r: %s", queries[0], exc)
-        return []
+        note = NOTE_WEB_SKIPPED if "TAVILY_API_KEY" in str(exc) else NOTE_WEB_DOWN
+        return [], note
 
     evidence: list[Evidence] = []
     for hit in hits:
@@ -229,7 +296,7 @@ def _search_web(queries: list[str], known_pmids: set[str], fact_text: str) -> li
                 continue
             # Couldn't fetch the clean record — fall back to the web result.
         evidence.append(_web_to_evidence(hit))
-    return evidence
+    return evidence, ""
 
 
 def _resolve_pubmed_pmid(url: str) -> str | None:
@@ -273,6 +340,13 @@ def _pubmed_to_evidence(article: pubmed.PubMedArticle, fact_text: str) -> Eviden
         source_name=article.journal or "PubMed",
         source_tier=classification.tier,
         relevance_score=_lexical_relevance(fact_text, f"{article.title} {article.summary}"),
+        # Stamp animal / in-vitro work now (token-free); the verdict engine
+        # decides direct vs indirect for the human studies.
+        applicability=(
+            EvidenceApplicability.NON_HUMAN
+            if article.is_animal_study
+            else EvidenceApplicability.UNKNOWN
+        ),
         publication_date=article.publication_date,
     )
 
@@ -302,9 +376,30 @@ def _rank_score(evidence: Evidence) -> float:
     """Blend relevance with a tier head-start so authority and fit both count.
 
     Only applied to items that already cleared `RELEVANCE_FLOOR`, so the tier
-    bonus orders *relevant* results — it never rescues irrelevant ones.
+    bonus orders *relevant* results — it never rescues irrelevant ones. Animal /
+    in-vitro studies take a flat penalty so human evidence always sorts first.
     """
-    return evidence.relevance_score + _TIER_BONUS.get(evidence.source_tier, 0.0)
+    score = evidence.relevance_score + _TIER_BONUS.get(evidence.source_tier, 0.0)
+    if _is_non_human(evidence):
+        score -= _NON_HUMAN_PENALTY
+    return score
+
+
+def _is_non_human(evidence: Evidence) -> bool:
+    return evidence.applicability is EvidenceApplicability.NON_HUMAN
+
+
+def _cap_non_human(ranked: list[Evidence]) -> list[Evidence]:
+    """Keep at most `_MAX_NON_HUMAN_PER_FACT` animal/in-vitro items (best first)."""
+    kept: list[Evidence] = []
+    non_human_seen = 0
+    for ev in ranked:
+        if _is_non_human(ev):
+            if non_human_seen >= _MAX_NON_HUMAN_PER_FACT:
+                continue
+            non_human_seen += 1
+        kept.append(ev)
+    return kept
 
 
 def _dedupe_by_url(evidence: list[Evidence]) -> list[Evidence]:
